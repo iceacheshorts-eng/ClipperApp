@@ -1,0 +1,8 @@
+[Oo]bj/
+[Bb]in/
+*.user
+*.suo
+*.userprefs
+*.DS_Store
+ClipStudio/ClipStudio/bin/
+ClipStudio/ClipStudio/obj/

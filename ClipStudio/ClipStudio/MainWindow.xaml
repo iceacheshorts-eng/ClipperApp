@@ -1,0 +1,120 @@
+<Window x:Class="ClipStudio.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:local="clr-namespace:ClipStudio"
+        xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
+        xmlns:converters="clr-namespace:ClipStudio.Converters"
+        mc:Ignorable="d"
+        Title="ClipStudio" Height="700" Width="1000"
+        TextElement.Foreground="{DynamicResource MaterialDesignBody}"
+        TextElement.FontWeight="Regular"
+        TextElement.FontSize="14"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="Auto"
+        Background="{DynamicResource MaterialDesignPaper}"
+        FontFamily="{DynamicResource MaterialDesignFont}">
+    <Window.Resources>
+        <converters:BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter"/>
+    </Window.Resources>
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="150"/>
+        </Grid.RowDefinitions>
+
+        <!-- Input and Output -->
+        <Grid Grid.Row="0" Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto"/>
+                <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <TextBlock Text="Source (URL/File):" VerticalAlignment="Center" Margin="0,0,8,0" Grid.Row="0" Grid.Column="0"/>
+            <TextBox Text="{Binding SourcePath, UpdateSourceTrigger=PropertyChanged}" Grid.Row="0" Grid.Column="1" Margin="0,0,8,0" />
+            <Button Content="Browse..." Command="{Binding BrowseSourceCommand}" Grid.Row="0" Grid.Column="2" />
+
+            <TextBlock Text="Output Folder:" VerticalAlignment="Center" Margin="0,8,8,0" Grid.Row="1" Grid.Column="0"/>
+            <TextBox Text="{Binding OutputFolder, UpdateSourceTrigger=PropertyChanged}" Grid.Row="1" Grid.Column="1" Margin="0,8,8,0" />
+            <Button Content="Browse..." Command="{Binding BrowseOutputCommand}" Grid.Row="1" Grid.Column="2" Margin="0,8,0,0"/>
+        </Grid>
+
+        <!-- Settings -->
+        <WrapPanel Grid.Row="1" Margin="0,0,0,16">
+            <ComboBox materialDesign:HintAssist.Hint="Quality" ItemsSource="{Binding Qualities}" SelectedItem="{Binding SelectedQuality}" Width="120" Margin="0,0,16,0"/>
+            <ComboBox materialDesign:HintAssist.Hint="Content Style" ItemsSource="{Binding ContentStyles}" SelectedItem="{Binding SelectedContentStyle}" Width="150" Margin="0,0,16,0"/>
+
+            <TextBox materialDesign:HintAssist.Hint="Clip Count" Text="{Binding ClipCount, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="0,0,16,0"/>
+            <TextBox materialDesign:HintAssist.Hint="Clip Length (s)" Text="{Binding ClipLengthMultiplier, UpdateSourceTrigger=PropertyChanged}" Width="120" Margin="0,0,16,0"/>
+
+            <CheckBox Content="Review clips before rendering" IsChecked="{Binding ReviewClipsEnabled}" Margin="0,0,16,0" VerticalAlignment="Center"/>
+            <CheckBox Content="Remove filler words" IsChecked="{Binding RemoveFillerWordsEnabled}" Margin="0,0,16,0" VerticalAlignment="Center"/>
+            <!-- Trimming dead air removed based on user input -->
+        </WrapPanel>
+
+        <!-- Action Buttons & Progress -->
+        <Grid Grid.Row="2" Margin="0,0,0,16">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <Button Content="Start" Command="{Binding StartCommand}" Grid.Column="0" Margin="0,0,8,0" Width="100"/>
+            <Button Content="Cancel" Command="{Binding CancelCommand}" Grid.Column="1" Margin="0,0,16,0" Width="100" Style="{StaticResource MaterialDesignOutlinedButton}"/>
+
+            <ProgressBar Minimum="0" Maximum="100" Value="{Binding ProgressValue}" Grid.Column="2" Height="10" VerticalAlignment="Center" Margin="0,0,16,0"/>
+            <TextBlock Text="{Binding StatusText}" Grid.Column="3" VerticalAlignment="Center"/>
+        </Grid>
+
+        <!-- Review Checklist -->
+        <GroupBox Header="Review Proposed Clips" Grid.Row="3" Margin="0,0,0,16"
+                  Visibility="{Binding IsReviewing, Converter={StaticResource BooleanToVisibilityConverter}}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <ListBox ItemsSource="{Binding ProposedClips}" Grid.Row="0" Margin="0,0,0,8">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <CheckBox IsChecked="{Binding IsApproved}">
+                                <TextBlock Text="{Binding DisplayText}" />
+                            </CheckBox>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+
+                <StackPanel Orientation="Horizontal" Grid.Row="1" HorizontalAlignment="Right">
+                    <Button Content="Approve &amp; Render" Command="{Binding ApproveAndRenderCommand}" Margin="0,0,8,0"/>
+                    <Button Content="Cancel Rendering" Command="{Binding CancelCommand}" Style="{StaticResource MaterialDesignOutlinedButton}"/>
+                </StackPanel>
+            </Grid>
+        </GroupBox>
+
+        <TextBlock Text="Activity Log:" Grid.Row="4" Margin="0,0,0,4" FontWeight="Bold"/>
+
+        <!-- Activity Log -->
+        <ListBox ItemsSource="{Binding Logger.Logs}" Grid.Row="5"
+                 Background="{DynamicResource MaterialDesignTextFieldBoxBackground}"
+                 ScrollViewer.VerticalScrollBarVisibility="Auto">
+            <ListBox.ItemTemplate>
+                <DataTemplate>
+                    <TextBlock Text="{Binding}" TextWrapping="Wrap"/>
+                </DataTemplate>
+            </ListBox.ItemTemplate>
+        </ListBox>
+    </Grid>
+</Window>
