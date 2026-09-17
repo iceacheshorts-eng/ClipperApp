@@ -111,10 +111,10 @@ namespace ClipStudio.Services
                 // For sendcmd, we push variables. It's safer to push absolute string expressions.
                 // We'll push exact values.
 
-                // 0.00-0.10 [expr] x '0.5*iw - out_w/2';
+                // 0.00-0.10 crop x '0.5*iw - out_w/2';
                 // We'll use step intervals.
                 double endTime = relT + 0.1; // 10fps tracking assumed
-                sb.AppendLine($"{relT:F2}-{endTime:F2} [expr] crop x '{point.Cx:F4}*iw - out_w/2', crop y '{point.Cy:F4}*ih - out_h/2';");
+                sb.AppendLine($"{relT:F2}-{endTime:F2} crop x '{point.Cx:F4}*iw - out_w/2', crop y '{point.Cy:F4}*ih - out_h/2';");
             }
 
             File.WriteAllText(path, sb.ToString());

@@ -29,7 +29,7 @@ namespace ClipStudio.Services
             string format = $"bestvideo[height<={quality.Replace("p", "")}]+bestaudio/best[height<={quality.Replace("p", "")}]";
 
             string finalFilePattern = Path.Combine(outputFolder, "%(title)s.%(ext)s");
-            string arguments = $"--no-playlist --newline -f \"{format}\" -o \"{finalFilePattern}\" \"{url}\" --ffmpeg-location \"{Path.Combine(AppContext.BaseDirectory, "Binaries")}\"";
+            string arguments = $"--no-playlist --newline -f \"{format}\" --merge-output-format mp4 -o \"{finalFilePattern}\" \"{url}\" --ffmpeg-location \"{Path.Combine(AppContext.BaseDirectory, "Binaries")}\"";
 
             string? finalFilePath = null;
             Regex progressRegex = new Regex(@"\[download\]\s+(?<percent>\d+\.\d)%");
