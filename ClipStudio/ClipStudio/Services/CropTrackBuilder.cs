@@ -25,17 +25,21 @@ namespace ClipStudio.Services
                 return track;
             }
 
-            double deadzone = 0.02;
-            double easeFactor = 0.15;
+            // Upgraded cinematic tracking parameters
+            double deadzone = 0.05; // Slightly larger deadzone to avoid micro-jitters
+            double springConstant = 8.0; // Stiffness of the camera "spring"
+            double dampingRatio = 1.0; // Critically damped (no bouncing, just smooth arrival)
+            double dt = 1.0 / fps; // output fps integration step
+            double damping = 2.0 * Math.Sqrt(springConstant) * dampingRatio;
 
             var orderedDetections = detections.OrderBy(d => d.T).ToList();
-
-            // Assume 1 fps sampling for the input, we want to generate a point for every output frame (e.g. 30fps)
-            // But to keep script size small, we can generate points every 0.1 seconds and let ffmpeg interpolate
 
             double currentT = 0;
             double currentCx = 0.5; // Start center
             double currentCy = 0.5;
+
+            double velocityX = 0;
+            double velocityY = 0;
 
             double targetCx = 0.5;
             double targetCy = 0.5;
@@ -52,25 +56,41 @@ namespace ClipStudio.Services
                     detIndex++;
                 }
 
-                // Check deadzone
+                // Calculate spring physics for X
                 if (Math.Abs(targetCx - currentCx) > deadzone)
                 {
-                    currentCx += (targetCx - currentCx) * easeFactor;
+                    double forceX = springConstant * (targetCx - currentCx) - damping * velocityX;
+                    velocityX += forceX * dt;
+                    currentCx += velocityX * dt;
+                }
+                else
+                {
+                    // Decay velocity if inside deadzone for super smooth stop
+                    velocityX *= 0.9;
+                    currentCx += velocityX * dt;
                 }
 
+                // Calculate spring physics for Y
                 if (Math.Abs(targetCy - currentCy) > deadzone)
                 {
-                    currentCy += (targetCy - currentCy) * easeFactor;
+                    double forceY = springConstant * (targetCy - currentCy) - damping * velocityY;
+                    velocityY += forceY * dt;
+                    currentCy += velocityY * dt;
+                }
+                else
+                {
+                    velocityY *= 0.9;
+                    currentCy += velocityY * dt;
                 }
 
                 // Clamp to safe boundaries so 9:16 crop doesn't go out of bounds
-                // Assuming output is 9:16 (w=0.5625 of height). So cx min/max needs clamping
                 double cropW = 9.0 / 16.0;
                 double minCx = cropW / 2.0;
                 double maxCx = 1.0 - (cropW / 2.0);
 
                 currentCx = Math.Clamp(currentCx, minCx, maxCx);
-                // Vertical panning isn't usually needed as much for landscape->portrait, but clamped
+
+                // Keep Y locked to center for modern vertical video style unless dramatic change
                 currentCy = Math.Clamp(currentCy, 0.5, 0.5);
 
                 track.Add(new CropPoint
@@ -80,7 +100,7 @@ namespace ClipStudio.Services
                     Cy = currentCy
                 });
 
-                currentT += 0.1; // 10 points per second
+                currentT += dt;
             }
 
             return track;
