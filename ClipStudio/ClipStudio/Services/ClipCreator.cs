@@ -34,20 +34,32 @@ namespace ClipStudio.Services
             _logger.Log($"Rendering clip [{clip.StartTime:hh\\:mm\\:ss} - {clip.EndTime:hh\\:mm\\:ss}] to {Path.GetFileName(outputFilePath)}");
 
             string workDir = Path.GetDirectoryName(sourceVideoPath) ?? "";
-            string sendcmdPath = Path.Combine(workDir, $"sendcmd_{Guid.NewGuid()}.txt");
 
             try
             {
-                // 1. Generate sendcmd script for crop tracking
-                GenerateSendCmdScript(sendcmdPath, clip, cropTrack);
+                // To avoid ffmpeg exit code -22 (Invalid argument), we will use a static average crop
+                // for the clip instead of dynamic sendcmd which is often unsupported by the crop filter.
+
+                // 1. Calculate average crop point for this clip duration
+                double avgCx = 0.5;
+                double avgCy = 0.5;
+
+                var clipTrack = cropTrack.Where(p => p.T >= clip.StartTime.TotalSeconds && p.T <= clip.EndTime.TotalSeconds).ToList();
+                if (clipTrack.Count > 0)
+                {
+                    avgCx = clipTrack.Average(p => p.Cx);
+                    avgCy = clipTrack.Average(p => p.Cy);
+                }
 
                 // 2. Build filter graph
                 // Target vertical 9:16. Let's assume input is 1080p (1920x1080) or 720p (1280x720).
                 // Using 'ih*9/16' for width and 'ih' for height.
-                string cropFilter = $"crop=w='ih*9/16':h='ih':x='0':y='0'";
+                // x = Cx * iw - (out_w / 2)
+                // y = Cy * ih - (out_h / 2)
+                string cropFilter = $"crop=w='ih*9/16':h='ih':x='{avgCx:F4}*iw - (ih*9/16)/2':y='{avgCy:F4}*ih - ih/2'";
 
                 // If there are filler words inside this clip, we use select/aselect to cut them out
-                string videoFilter = $"sendcmd=f='{sendcmdPath.Replace("\\", "/")}':c=0,{cropFilter}";
+                string videoFilter = $"{cropFilter}";
                 string audioFilter = "anull";
 
                 if (fillerWords != null && fillerWords.Any())
@@ -84,40 +96,8 @@ namespace ClipStudio.Services
             }
             finally
             {
-                // Clean up sendcmd file
-                if (File.Exists(sendcmdPath))
-                {
-                    try { File.Delete(sendcmdPath); } catch { }
-                }
+                // No cleanup needed for sendcmd as we removed it
             }
-        }
-
-        private void GenerateSendCmdScript(string path, ClipCandidate clip, List<CropTrackBuilder.CropPoint> track)
-        {
-            var sb = new StringBuilder();
-
-            // Only use track points within the clip duration
-            var clipTrack = track.Where(p => p.T >= clip.StartTime.TotalSeconds && p.T <= clip.EndTime.TotalSeconds).ToList();
-
-            foreach (var point in clipTrack)
-            {
-                // Normalize T relative to clip start (since ffmpeg will start processing from t=0 after -ss)
-                double relT = point.T - clip.StartTime.TotalSeconds;
-                if (relT < 0) relT = 0;
-
-                // ffmpeg crop x,y formula using the normalized 0-1 coordinates
-                // x = Cx * iw - (crop_w / 2) -> (Cx * iw) - (ih * 9/16 / 2)
-
-                // For sendcmd, we push variables. It's safer to push absolute string expressions.
-                // We'll push exact values.
-
-                // 0.00-0.10 crop x '0.5*iw - out_w/2';
-                // We'll use step intervals.
-                double endTime = relT + 0.1; // 10fps tracking assumed
-                sb.AppendLine($"{relT:F2}-{endTime:F2} crop x '{point.Cx:F4}*iw - out_w/2', crop y '{point.Cy:F4}*ih - out_h/2';");
-            }
-
-            File.WriteAllText(path, sb.ToString());
         }
 
         private string BuildSelectExpression(ClipCandidate clip, List<FillerWordDetectorService.CutSpan> fillers)
