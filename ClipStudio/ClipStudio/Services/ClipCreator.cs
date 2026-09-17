@@ -31,72 +31,151 @@ namespace ClipStudio.Services
             if (!File.Exists(_ffmpegPath))
                 throw new FileNotFoundException($"ffmpeg.exe not found at {_ffmpegPath}");
 
-            _logger.Log($"Rendering clip [{clip.StartTime:hh\\:mm\\:ss} - {clip.EndTime:hh\\:mm\\:ss}] to {Path.GetFileName(outputFilePath)}");
+            _logger.Log($"Rendering clip [{clip.StartTime:hh\\:mm\\:ss} - {clip.EndTime:hh\\:mm\\:ss}] with advanced dynamic frame cropping to {Path.GetFileName(outputFilePath)}");
 
             string workDir = Path.GetDirectoryName(sourceVideoPath) ?? "";
 
+            // Temporary files for the 2-step process
+            string tempFullVideoPath = Path.Combine(workDir, $"temp_full_{Guid.NewGuid()}.mp4");
+
             try
             {
-                // To avoid ffmpeg exit code -22 (Invalid argument), we will use a static average crop
-                // for the clip instead of dynamic sendcmd which is often unsupported by the crop filter.
+                // STEP 1: Fast extract the un-cropped continuous clip segment with audio
+                // This ensures we have perfectly synced audio and a small file to process frame-by-frame.
+                // We do NOT filter filler words yet, so the timeline stays 1:1 with the crop track.
+                string extractArgs = $"-y -ss {clip.StartTime.TotalSeconds} -to {clip.EndTime.TotalSeconds} -i \"{sourceVideoPath}\" " +
+                                     $"-c:v libx264 -preset ultrafast -crf 18 -c:a aac -b:a 192k " +
+                                     $"\"{tempFullVideoPath}\"";
 
-                // 1. Calculate average crop point for this clip duration
-                double avgCx = 0.5;
-                double avgCy = 0.5;
+                int extractExitCode = await ProcessUtils.RunProcessAsync(_ffmpegPath, extractArgs, workDir, _ => {}, cancellationToken);
+                if (extractExitCode != 0) throw new Exception($"ffmpeg extraction failed with exit code {extractExitCode}");
 
-                var clipTrack = cropTrack.Where(p => p.T >= clip.StartTime.TotalSeconds && p.T <= clip.EndTime.TotalSeconds).ToList();
-                if (clipTrack.Count > 0)
+                // STEP 2: Use OpenCvSharp to read the extracted video, apply smooth dynamic cropping frame-by-frame, and pipe to FFmpeg.
+                await Task.Run(() =>
                 {
-                    avgCx = clipTrack.Average(p => p.Cx);
-                    avgCy = clipTrack.Average(p => p.Cy);
-                }
+                    using var capture = new OpenCvSharp.VideoCapture(tempFullVideoPath);
+                    if (!capture.IsOpened()) throw new Exception("Could not open temp video for frame cropping.");
 
-                // 2. Build filter graph
-                // Target vertical 9:16. Let's assume input is 1080p (1920x1080) or 720p (1280x720).
-                // Using 'ih*9/16' for width and 'ih' for height.
-                // x = Cx * iw - (out_w / 2)
-                // y = Cy * ih - (out_h / 2)
-                string cropFilter = $"crop=w='ih*9/16':h='ih':x='{avgCx:F4}*iw - (ih*9/16)/2':y='{avgCy:F4}*ih - ih/2'";
+                    double fps = capture.Fps;
+                    int width = capture.FrameWidth;
+                    int height = capture.FrameHeight;
 
-                // If there are filler words inside this clip, we use select/aselect to cut them out
-                string videoFilter = $"{cropFilter}";
-                string audioFilter = "anull";
+                    // Calculate target vertical crop dimensions
+                    int targetHeight = height;
+                    int targetWidth = (int)(height * 9.0 / 16.0);
+                    // Ensure even dimensions
+                    if (targetWidth % 2 != 0) targetWidth--;
 
-                if (fillerWords != null && fillerWords.Any())
-                {
-                    // Filter filler words that overlap with this clip
-                    var clipFillers = fillerWords
-                        .Where(f => f.Start < clip.EndTime && f.End > clip.StartTime)
-                        .ToList();
+                    // Build filter for filler words to apply to the piped output
+                    string filterComplex = "";
+                    string mapArgs = "-map 0:v:0 -map 1:a:0?";
 
-                    if (clipFillers.Any())
+                    if (fillerWords != null && fillerWords.Any())
                     {
-                        var selectExpr = BuildSelectExpression(clip, clipFillers);
-                        videoFilter += $",select='{selectExpr}',setpts=N/FRAME_RATE/TB";
-                        audioFilter = $"aselect='{selectExpr}',asetpts=N/SR/TB";
+                        var clipFillers = fillerWords
+                            .Where(f => f.Start < clip.EndTime && f.End > clip.StartTime)
+                            .ToList();
+
+                        if (clipFillers.Any())
+                        {
+                            var selectExpr = BuildSelectExpression(clip, clipFillers);
+                            filterComplex = $"-filter_complex \"[0:v]select='{selectExpr}',setpts=N/FRAME_RATE/TB[vout];[1:a]aselect='{selectExpr}',asetpts=N/SR/TB[aout]\" ";
+                            mapArgs = "-map \"[vout]\" -map \"[aout]\"";
+                        }
                     }
-                }
 
-                string arguments = $"-y -ss {clip.StartTime.TotalSeconds} -to {clip.EndTime.TotalSeconds} -i \"{sourceVideoPath}\" " +
-                                   $"-vf \"{videoFilter}\" " +
-                                   $"-af \"{audioFilter}\" " +
-                                   $"-c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k " +
-                                   $"\"{outputFilePath}\"";
+                    // Start an ffmpeg process that reads raw BGR24 frames from stdin
+                    string pipeArgs = $"-y -loglevel error -f rawvideo -vcodec rawvideo -s {targetWidth}x{targetHeight} -r {fps} -pix_fmt bgr24 -i - " +
+                                      $"-i \"{tempFullVideoPath}\" " + // input 1 is original for audio
+                                      $"{filterComplex}{mapArgs} " +
+                                      $"-c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k " +
+                                      $"\"{outputFilePath}\"";
 
-                int exitCode = await ProcessUtils.RunProcessAsync(_ffmpegPath, arguments, workDir, line => {
-                    // Optional logging of ffmpeg rendering
+                    var processStartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = _ffmpegPath,
+                        Arguments = pipeArgs,
+                        RedirectStandardInput = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        WorkingDirectory = workDir
+                    };
+
+                    using var process = new System.Diagnostics.Process { StartInfo = processStartInfo };
+                    process.Start();
+
+                    // Asynchronously consume standard error to avoid process deadlock
+                    var errorLogTask = process.StandardError.ReadToEndAsync();
+
+                    // Pre-filter the crop track for this clip to optimize lookup
+                    var clipTrack = cropTrack.Where(p => p.T >= clip.StartTime.TotalSeconds && p.T <= clip.EndTime.TotalSeconds).ToList();
+
+                    using var frame = new OpenCvSharp.Mat();
+                    int frameIndex = 0;
+
+                    while (capture.Read(frame) && !frame.Empty())
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+
+                        double currentVideoTime = frameIndex / fps;
+                        double absoluteTime = clip.StartTime.TotalSeconds + currentVideoTime;
+
+                        // Find the closest crop point
+                        var cropPoint = clipTrack.OrderBy(p => Math.Abs(p.T - absoluteTime)).FirstOrDefault();
+
+                        double cx = cropPoint?.Cx ?? 0.5;
+                        double cy = cropPoint?.Cy ?? 0.5;
+
+                        // Calculate crop rectangle safely
+                        int x = (int)(cx * width - targetWidth / 2.0);
+                        int y = (int)(cy * height - targetHeight / 2.0);
+
+                        x = Math.Clamp(x, 0, width - targetWidth);
+                        y = Math.Clamp(y, 0, height - targetHeight);
+
+                        var cropRect = new OpenCvSharp.Rect(x, y, targetWidth, targetHeight);
+                        using var subMat = new OpenCvSharp.Mat(frame, cropRect);
+                        using var croppedFrame = subMat.Clone(); // Clone to guarantee contiguous memory stride
+
+                        // Write raw bytes to ffmpeg stdin
+                        byte[] frameBytes = new byte[croppedFrame.Total() * croppedFrame.ElemSize()];
+                        System.Runtime.InteropServices.Marshal.Copy(croppedFrame.Data, frameBytes, 0, frameBytes.Length);
+
+                        try
+                        {
+                            process.StandardInput.BaseStream.Write(frameBytes, 0, frameBytes.Length);
+                        }
+                        catch (IOException)
+                        {
+                            // ffmpeg process ended unexpectedly
+                            break;
+                        }
+
+                        frameIndex++;
+                    }
+
+                    // Close stdin to tell ffmpeg we are done sending frames
+                    process.StandardInput.Close();
+                    process.WaitForExit();
+
+                    if (process.ExitCode != 0)
+                    {
+                        string errorLog = errorLogTask.Result;
+                        throw new Exception($"ffmpeg piping failed with exit code {process.ExitCode}. Error: {errorLog}");
+                    }
+
                 }, cancellationToken);
 
-                if (exitCode != 0)
-                {
-                    throw new Exception($"ffmpeg render failed with exit code {exitCode}");
-                }
-
-                _logger.Log($"Clip rendered successfully: {outputFilePath}");
+                _logger.Log($"Advanced dynamic clip rendered successfully: {outputFilePath}");
             }
             finally
             {
-                // No cleanup needed for sendcmd as we removed it
+                if (File.Exists(tempFullVideoPath))
+                {
+                    try { File.Delete(tempFullVideoPath); } catch { }
+                }
             }
         }
 

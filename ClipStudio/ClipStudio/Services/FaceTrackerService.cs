@@ -1,56 +1,83 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Text.Json;
+using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using ClipStudio.Models;
+using OpenCvSharp.Dnn;
+using OpenCvSharp;
 
 namespace ClipStudio.Services
 {
     public class FaceTrackerService
     {
         private readonly IActivityLogger _logger;
-        // Mocking the Python sidecar. In the actual setup, this would be a real wrapper
-        // but user instructed "convert any Python into c#, implement these using NuGet packages"
-        // so we'll use OpenCvSharp here.
 
         public FaceTrackerService(IActivityLogger logger)
         {
             _logger = logger;
         }
 
+        private async Task EnsureModelExistsAsync(string modelsDir, string prototxtPath, string caffemodelPath)
+        {
+            if (!Directory.Exists(modelsDir))
+            {
+                Directory.CreateDirectory(modelsDir);
+            }
+
+            using var httpClient = new HttpClient();
+
+            if (!File.Exists(prototxtPath))
+            {
+                _logger.Log("Downloading ResNet DNN prototxt...");
+                string url = "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt";
+                var bytes = await httpClient.GetByteArrayAsync(url);
+                await File.WriteAllBytesAsync(prototxtPath, bytes);
+            }
+
+            if (!File.Exists(caffemodelPath))
+            {
+                _logger.Log("Downloading ResNet DNN caffemodel (this may take a moment)...");
+                string url = "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel";
+                var bytes = await httpClient.GetByteArrayAsync(url);
+                await File.WriteAllBytesAsync(caffemodelPath, bytes);
+            }
+        }
+
         public async Task<List<FaceDetection>> TrackFacesAsync(string videoPath, CancellationToken cancellationToken)
         {
-            _logger.Log("Starting face tracking via OpenCvSharp...");
+            _logger.Log("Starting advanced AI face tracking (SSD ResNet-10)...");
 
-            string cascadePath = Path.Combine(AppContext.BaseDirectory, "Models", "haarcascade_frontalface_default.xml");
-            if (!File.Exists(cascadePath))
-            {
-                throw new FileNotFoundException($"Haar cascade model not found at {cascadePath}. Please download it to Models/.");
-            }
+            string modelsDir = Path.Combine(AppContext.BaseDirectory, "Models");
+            string prototxtPath = Path.Combine(modelsDir, "deploy.prototxt");
+            string caffemodelPath = Path.Combine(modelsDir, "res10_300x300_ssd_iter_140000.caffemodel");
+
+            await EnsureModelExistsAsync(modelsDir, prototxtPath, caffemodelPath);
 
             var detections = new List<FaceDetection>();
 
             await Task.Run(() =>
             {
-                using var capture = new OpenCvSharp.VideoCapture(videoPath);
+                using var net = CvDnn.ReadNetFromCaffe(prototxtPath, caffemodelPath);
+
+                using var capture = new VideoCapture(videoPath);
                 if (!capture.IsOpened())
                 {
                     throw new Exception("Could not open video file for face tracking.");
                 }
 
-                using var cascade = new OpenCvSharp.CascadeClassifier(cascadePath);
-
                 double fps = capture.Fps;
                 if (fps <= 0) fps = 30; // Fallback
                 int totalFrames = (int)capture.FrameCount;
 
-                using var frame = new OpenCvSharp.Mat();
-                using var gray = new OpenCvSharp.Mat();
+                using var frame = new Mat();
 
                 int frameIndex = 0;
-                int skipFrames = (int)fps; // Sample 1 fps to keep it fast
+
+                // Sample 5 frames per second for high accuracy and smooth tracking
+                double targetFps = 5.0;
+                int skipFrames = Math.Max(1, (int)Math.Round(fps / targetFps));
 
                 int framesProcessed = 0;
                 int totalSampleFrames = totalFrames / skipFrames;
@@ -61,31 +88,40 @@ namespace ClipStudio.Services
 
                     if (frameIndex % skipFrames == 0)
                     {
-                        OpenCvSharp.Cv2.CvtColor(frame, gray, OpenCvSharp.ColorConversionCodes.BGR2GRAY);
+                        // The SSD model expects 300x300 input blob
+                        using var blob = CvDnn.BlobFromImage(frame, 1.0, new Size(300, 300), new Scalar(104.0, 177.0, 123.0), false, false);
 
-                        // Very simple optimization
-                        OpenCvSharp.Cv2.Resize(gray, gray, new OpenCvSharp.Size(640, 360));
+                        net!.SetInput(blob, "data");
+                        using var detection = net.Forward("detection_out");
 
-                        var faces = cascade.DetectMultiScale(
-                            gray,
-                            scaleFactor: 1.1,
-                            minNeighbors: 5,
-                            minSize: new OpenCvSharp.Size(30, 30));
+                        // detection output is 4D: [1, 1, N, 7]
+                        var detectionMat = Mat.FromPixelData(detection!.Size(2), detection!.Size(3), MatType.CV_32F, detection!.Data);
 
                         double t = frameIndex / fps;
 
-                        foreach (var face in faces)
+                        int rows = detectionMat.Rows;
+                        for (int i = 0; i < rows; i++)
                         {
-                            // Normalize coordinates back to 0-1 range based on the resized 640x360 frame
-                            detections.Add(new FaceDetection
+                            float confidence = detectionMat.At<float>(i, 2);
+
+                            // Strict confidence threshold for accuracy
+                            if (confidence > 0.5)
                             {
-                                T = t,
-                                Type = "face",
-                                Cx = (face.X + face.Width / 2.0) / 640.0,
-                                Cy = (face.Y + face.Height / 2.0) / 360.0,
-                                W = face.Width / 640.0,
-                                H = face.Height / 360.0
-                            });
+                                float x1 = detectionMat.At<float>(i, 3);
+                                float y1 = detectionMat.At<float>(i, 4);
+                                float x2 = detectionMat.At<float>(i, 5);
+                                float y2 = detectionMat.At<float>(i, 6);
+
+                                detections.Add(new FaceDetection
+                                {
+                                    T = t,
+                                    Type = "face",
+                                    Cx = (x1 + x2) / 2.0,
+                                    Cy = (y1 + y2) / 2.0,
+                                    W = Math.Abs(x2 - x1),
+                                    H = Math.Abs(y2 - y1)
+                                });
+                            }
                         }
 
                         framesProcessed++;
