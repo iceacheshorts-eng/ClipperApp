@@ -52,6 +52,9 @@ namespace ClipStudio.Services
                 int frameIndex = 0;
                 int skipFrames = (int)fps; // Sample 1 fps to keep it fast
 
+                int framesProcessed = 0;
+                int totalSampleFrames = totalFrames / skipFrames;
+
                 while (capture.Read(frame) && !frame.Empty())
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -83,6 +86,12 @@ namespace ClipStudio.Services
                                 W = face.Width / 640.0,
                                 H = face.Height / 360.0
                             });
+                        }
+
+                        framesProcessed++;
+                        if (framesProcessed % 50 == 0)
+                        {
+                            _logger.Log($"Face Tracking: Processed {framesProcessed} out of {totalSampleFrames} frames...");
                         }
                     }
                     frameIndex++;
