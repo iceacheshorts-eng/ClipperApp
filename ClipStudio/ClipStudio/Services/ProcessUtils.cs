@@ -9,27 +9,6 @@ namespace ClipStudio.Services
     public static class ProcessUtils
     {
         public static async Task<int> RunProcessAsync(
-            string fileName,
-            string arguments,
-            string workingDirectory,
-            Action<string> onOutputLine,
-            CancellationToken cancellationToken)
-        {
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = fileName,
-                Arguments = arguments,
-                WorkingDirectory = workingDirectory,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            return await RunProcessCoreAsync(startInfo, onOutputLine, cancellationToken);
-        }
-
-        public static async Task<int> RunProcessAsync(
             ProcessStartInfo startInfo,
             Action<string> onOutputLine,
             CancellationToken cancellationToken)

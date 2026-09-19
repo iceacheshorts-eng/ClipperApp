@@ -31,9 +31,24 @@ namespace ClipStudio.Services
 
             _logger.Log("Extracting audio to WAV...");
 
-            string arguments = $"-y -i \"{videoPath}\" -vn -acodec pcm_s16le -ar 16000 -ac 1 \"{wavPath}\"";
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = _ffmpegPath,
+                WorkingDirectory = Path.GetDirectoryName(videoPath) ?? ""
+            };
+            startInfo.ArgumentList.Add("-y");
+            startInfo.ArgumentList.Add("-i");
+            startInfo.ArgumentList.Add(videoPath);
+            startInfo.ArgumentList.Add("-vn");
+            startInfo.ArgumentList.Add("-acodec");
+            startInfo.ArgumentList.Add("pcm_s16le");
+            startInfo.ArgumentList.Add("-ar");
+            startInfo.ArgumentList.Add("16000");
+            startInfo.ArgumentList.Add("-ac");
+            startInfo.ArgumentList.Add("1");
+            startInfo.ArgumentList.Add(wavPath);
 
-            int exitCode = await ProcessUtils.RunProcessAsync(_ffmpegPath, arguments, Path.GetDirectoryName(videoPath) ?? "", line => {
+            int exitCode = await ProcessUtils.RunProcessAsync(startInfo, line => {
                 // optional: log ffmpeg output
             }, cancellationToken);
 
