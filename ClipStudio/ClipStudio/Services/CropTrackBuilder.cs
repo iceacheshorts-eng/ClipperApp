@@ -27,12 +27,19 @@ namespace ClipStudio.Services
 
             // Upgraded cinematic tracking parameters
             double deadzone = 0.05; // Slightly larger deadzone to avoid micro-jitters
-            double springConstant = 8.0; // Stiffness of the camera "spring"
+
+            // Increased spring constant for a faster pan when target changes
+            double springConstant = 25.0; // Stiffness of the camera "spring"
             double dampingRatio = 1.0; // Critically damped (no bouncing, just smooth arrival)
             double dt = 1.0 / fps; // output fps integration step
             double damping = 2.0 * Math.Sqrt(springConstant) * dampingRatio;
 
-            var orderedDetections = detections.OrderBy(d => d.T).ToList();
+            // Group detections by time (T). For multiple faces at the same timestamp, pick the largest one (nearest person).
+            var orderedDetections = detections
+                .GroupBy(d => d.T)
+                .Select(g => g.OrderByDescending(d => d.W * d.H).First())
+                .OrderBy(d => d.T)
+                .ToList();
 
             double currentT = 0;
             double currentCx = 0.5; // Start center
