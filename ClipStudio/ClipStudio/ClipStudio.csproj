@@ -30,4 +30,10 @@
     <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />
   </ItemGroup>
 
+  <Target Name="CreateOutputFolder" AfterTargets="Build">
+    <MakeDir Directories="$(OutDir)output" />
+  </Target>
+  <Target Name="CreateOutputFolderOnPublish" AfterTargets="Publish">
+    <MakeDir Directories="$(PublishDir)output" />
+  </Target>
 </Project>

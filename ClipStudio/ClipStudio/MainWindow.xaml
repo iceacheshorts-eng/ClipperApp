@@ -55,7 +55,9 @@
             <ComboBox materialDesign:HintAssist.Hint="Content Style" ItemsSource="{Binding ContentStyles}" SelectedItem="{Binding SelectedContentStyle}" Width="150" Margin="0,0,16,0"/>
 
             <TextBox materialDesign:HintAssist.Hint="Clip Count" Text="{Binding ClipCount, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="0,0,16,0"/>
-            <TextBox materialDesign:HintAssist.Hint="Clip Length (s)" Text="{Binding ClipLengthMultiplier, UpdateSourceTrigger=PropertyChanged}" Width="120" Margin="0,0,16,0"/>
+
+            <CheckBox Content="AI Automated Clip (picks length, 15-60s)" IsChecked="{Binding AutoClipEnabled}" Margin="0,0,16,0" VerticalAlignment="Center"/>
+            <TextBox materialDesign:HintAssist.Hint="Clip Length (s)" Text="{Binding ClipLengthMultiplier, UpdateSourceTrigger=PropertyChanged}" IsEnabled="{Binding ManualLengthEnabled}" Width="120" Margin="0,0,16,0"/>
 
             <CheckBox Content="Review clips before rendering" IsChecked="{Binding ReviewClipsEnabled}" Margin="0,0,16,0" VerticalAlignment="Center"/>
             <CheckBox Content="Remove filler words" IsChecked="{Binding RemoveFillerWordsEnabled}" Margin="0,0,16,0" VerticalAlignment="Center"/>

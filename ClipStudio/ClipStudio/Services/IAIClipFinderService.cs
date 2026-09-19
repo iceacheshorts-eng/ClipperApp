@@ -12,6 +12,7 @@ namespace ClipStudio.Services
             int count,
             double minSeconds,
             double maxSeconds,
+            bool autoLength,
             CancellationToken ct);
     }
 }

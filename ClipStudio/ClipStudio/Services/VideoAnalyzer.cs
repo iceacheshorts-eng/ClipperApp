@@ -91,6 +91,119 @@ namespace ClipStudio.Services
             }, cancellationToken);
         }
 
+        private const double AutoMinSeconds = 15.0;
+        private const double AutoMaxSeconds = 60.0;
+        private const double AutoStepSeconds = 5.0;
+        private const double HookSeconds = 3.0;
+        private const double HookWeight = 0.3;
+
+        // Allowed lengths for auto fallback
+        private static readonly int[] AutoCandidateLengths = { 15, 20, 30, 45, 60 };
+
+        public List<ClipCandidate> GenerateAutoLengthCandidates(List<double> loudnessScores, List<FaceDetection> detections, ContentStyle style, int clipCount)
+        {
+            if (loudnessScores.Count < AutoMinSeconds)
+                return new List<ClipCandidate>();
+
+            _logger.Log($"Generating {clipCount} clips based on '{style}' auto-length heuristics...");
+            var candidates = new List<ClipCandidate>();
+
+            // Pre-calculate prefix sums for loudness
+            double[] loudnessPrefixSum = new double[loudnessScores.Count + 1];
+            for (int i = 0; i < loudnessScores.Count; i++)
+            {
+                loudnessPrefixSum[i + 1] = loudnessPrefixSum[i] + loudnessScores[i];
+            }
+
+            // Pre-calculate face counts per second
+            int[] faceCountsPerSecond = new int[loudnessScores.Count];
+            foreach (var d in detections)
+            {
+                int sec = (int)Math.Floor(d.T);
+                if (sec >= 0 && sec < faceCountsPerSecond.Length)
+                {
+                    faceCountsPerSecond[sec]++;
+                }
+            }
+
+            // Prefix sums for face counts
+            int[] facesPrefixSum = new int[faceCountsPerSecond.Length + 1];
+            for (int i = 0; i < faceCountsPerSecond.Length; i++)
+            {
+                facesPrefixSum[i + 1] = facesPrefixSum[i] + faceCountsPerSecond[i];
+            }
+
+            var potentialWindows = new List<(int StartIndex, int Length, double FinalScore)>();
+
+            for (int i = 0; i < loudnessScores.Count; i += (int)AutoStepSeconds)
+            {
+                foreach (int L in AutoCandidateLengths)
+                {
+                    if (i + L <= loudnessScores.Count)
+                    {
+                        double loudnessSum = loudnessPrefixSum[i + L] - loudnessPrefixSum[i];
+                        double avgLoudness = loudnessSum / L;
+
+                        int facesInWindow = facesPrefixSum[i + L] - facesPrefixSum[i];
+                        double faceScore = Math.Min(1.0, facesInWindow / (L * 5.0));
+
+                        double baseScore = avgLoudness;
+                        switch (style)
+                        {
+                            case ContentStyle.Podcast:
+                                baseScore = (avgLoudness * 0.4) + (faceScore * 0.6);
+                                break;
+                            case ContentStyle.HighEnergy:
+                                baseScore = (avgLoudness * 0.8) + (faceScore * 0.2);
+                                break;
+                            default:
+                                baseScore = (avgLoudness * 0.5) + (faceScore * 0.5);
+                                break;
+                        }
+
+                        // Calculate hook over first HookSeconds
+                        double hookSum = loudnessPrefixSum[Math.Min(loudnessScores.Count, i + (int)HookSeconds)] - loudnessPrefixSum[i];
+                        double hook = hookSum / HookSeconds; // We assume there's always at least HookSeconds remaining if L >= 15
+
+                        double finalScore = (1 - HookWeight) * baseScore + HookWeight * hook;
+
+                        potentialWindows.Add((i, L, finalScore));
+                    }
+                }
+            }
+
+            var sortedWindows = potentialWindows.OrderByDescending(w => w.FinalScore).ToList();
+
+            foreach (var window in sortedWindows)
+            {
+                if (candidates.Count >= clipCount) break;
+
+                bool overlaps = candidates.Any(c =>
+                    !(window.StartIndex + window.Length <= c.StartTime.TotalSeconds ||
+                      window.StartIndex >= c.EndTime.TotalSeconds));
+
+                if (!overlaps)
+                {
+                    candidates.Add(new ClipCandidate
+                    {
+                        StartTime = TimeSpan.FromSeconds(window.StartIndex),
+                        EndTime = TimeSpan.FromSeconds(window.StartIndex + window.Length),
+                        Score = window.FinalScore
+                    });
+                }
+            }
+
+            candidates = candidates.OrderBy(c => c.StartTime).ToList();
+
+            if (candidates.Any())
+            {
+                var summary = string.Join(", ", candidates.Select(c => $"{c.StartTime:hh\\:mm\\:ss} ({(c.EndTime - c.StartTime).TotalSeconds}s)"));
+                _logger.Log($"Auto-length fallback picked: {summary}");
+            }
+
+            return candidates;
+        }
+
         public List<ClipCandidate> GenerateCandidates(List<double> loudnessScores, List<FaceDetection> detections, ContentStyle style, int clipCount, double clipLength)
         {
             _logger.Log($"Generating {clipCount} clips based on '{style}' heuristics...");

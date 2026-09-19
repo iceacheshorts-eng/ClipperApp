@@ -23,11 +23,15 @@ namespace ClipStudio.Services
             _httpClient = new HttpClient();
         }
 
+        private const double AutoMinSeconds = 15.0;
+        private const double AutoMaxSeconds = 60.0;
+
         public async Task<List<ClipCandidate>> GetHighlightsAsync(
             IReadOnlyList<TranscriptSegment> transcript,
             int count,
             double minSeconds,
             double maxSeconds,
+            bool autoLength,
             CancellationToken ct)
         {
             string apiKey = Environment.GetEnvironmentVariable(GroqConfig.EnvVarName) ?? string.Empty;
@@ -49,7 +53,7 @@ namespace ClipStudio.Services
             // Request highlights per chunk (sequentially to respect basic rate limits)
             foreach (var chunk in chunks)
             {
-                var candidates = await GetHighlightsForChunkAsync(chunk, apiKey, count, minSeconds, maxSeconds, transcript, ct);
+                var candidates = await GetHighlightsForChunkAsync(chunk, apiKey, count, minSeconds, maxSeconds, autoLength, transcript, ct);
                 allCandidates.AddRange(candidates);
             }
 
@@ -78,20 +82,46 @@ namespace ClipStudio.Services
             int count,
             double minSeconds,
             double maxSeconds,
+            bool autoLength,
             IReadOnlyList<TranscriptSegment> fullTranscript,
             CancellationToken ct)
         {
-            var promptText = new StringBuilder();
-            promptText.AppendLine($"You are an AI video editor. Find up to {count} best highlights from the transcript below.");
-            promptText.AppendLine($"Choose self-contained moments that start and end on complete thoughts.");
-            promptText.AppendLine($"The ideal length for each clip is between {minSeconds} and {maxSeconds} seconds, but focus on the complete thought.");
-            promptText.AppendLine("Return a JSON object with a \"highlights\" array. Each item has: startSegment (int), endSegment (int), score (number 0.0-1.0), reason (short string).");
-            promptText.AppendLine("Use the numbers in square brackets exactly as shown. Do not renumber.");
-            promptText.AppendLine("Here is the numbered transcript:\n");
-
-            foreach (var seg in chunk)
+            if (autoLength)
             {
-                promptText.AppendLine($"[{seg.Index}] {seg.Text}");
+                minSeconds = AutoMinSeconds;
+                maxSeconds = AutoMaxSeconds;
+            }
+
+            var promptText = new StringBuilder();
+            if (autoLength)
+            {
+                promptText.AppendLine($"You are a short-form video editor who picks the clips most likely to go viral on TikTok, Reels and Shorts. Find up to {count} clips.");
+                promptText.AppendLine($"Each transcript line shows its start and end time in seconds. Choose each clip's length yourself: clip length = end time of endSegment minus start time of startSegment, and it must be between 15 and 60 seconds. Use only as long as the moment needs: a punchy moment can be 15-25 seconds, a story with a payoff can use up to 60. Never pad a clip to reach 60. Lengths should differ naturally between clips.");
+                promptText.AppendLine($"Virality criteria: a strong hook in the first 3 seconds (bold claim, question, surprise, strong opinion); an emotional or curiosity payoff (humor, conflict, revelation, useful tip); fully self-contained with no missing context; a clear setup-to-payoff arc; ends right after the payoff on a finished sentence. Avoid intros, outros, filler, housekeeping and setup with no payoff.");
+                promptText.AppendLine("Return a JSON object with a \"highlights\" array. Each item has: startSegment (int), endSegment (int), score (number 0.0-1.0), reason (short string).");
+                promptText.AppendLine("score = likelihood of going viral, 0.0 to 1.0. Use the full range; 0.9 and above should be rare.");
+                promptText.AppendLine("reason = one short sentence naming the hook and the payoff.");
+                promptText.AppendLine("Use the numbers in square brackets exactly as shown. Do not renumber.");
+                promptText.AppendLine("Here is the numbered transcript:\n");
+
+                foreach (var seg in chunk)
+                {
+                    promptText.AppendLine($"[{seg.Index}] ({seg.Start.TotalSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s-{seg.End.TotalSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s) {seg.Text}");
+                }
+            }
+            else
+            {
+                promptText.AppendLine($"You are an AI video editor. Find up to {count} best highlights from the transcript below.");
+                promptText.AppendLine($"Choose self-contained moments that start and end on complete thoughts.");
+                promptText.AppendLine($"The ideal length for each clip is between {minSeconds} and {maxSeconds} seconds, but focus on the complete thought.");
+                promptText.AppendLine("Return a JSON object with a \"highlights\" array. Each item has: startSegment (int), endSegment (int), score (number 0.0-1.0), reason (short string).");
+                promptText.AppendLine("Use the numbers in square brackets exactly as shown. Do not renumber.");
+                promptText.AppendLine("Here is the numbered transcript:\n");
+
+                foreach (var seg in chunk)
+                {
+                    promptText.AppendLine($"[{seg.Index}] {seg.Text}");
+                }
             }
 
             var payload = new
@@ -256,7 +286,7 @@ namespace ClipStudio.Services
                     var duration = (actualEnd - actualStart).TotalSeconds;
 
                     // Check if too long
-                    double maxLimitSeconds = maxSeconds * 1.3;
+                    double maxLimitSeconds = autoLength ? AutoMaxSeconds : (maxSeconds * 1.3);
                     if (duration > maxLimitSeconds)
                     {
                         var maxEndTime = actualStart + TimeSpan.FromSeconds(maxLimitSeconds);
@@ -302,7 +332,8 @@ namespace ClipStudio.Services
                     }
 
                     // Final duration check
-                    if (duration < minSeconds * 0.6)
+                    double minLimitSeconds = autoLength ? AutoMinSeconds : (minSeconds * 0.6);
+                    if (duration < minLimitSeconds)
                     {
                         _logger.Log($"Rejecting highlight: duration ({duration}s) is too short.");
                         continue;
@@ -311,6 +342,11 @@ namespace ClipStudio.Services
                     // Build transcript text
                     var textSegments = fullTranscript.Where(s => s.Start >= actualStart && s.End <= actualEnd).Select(s => s.Text);
                     string text = string.Join(" ", textSegments).Trim();
+
+                    if (autoLength)
+                    {
+                        _logger.Log($"AI clip [{actualStart:hh\\:mm\\:ss} - {actualEnd:hh\\:mm\\:ss}] ({duration:F1}s) score {h.Score:F2}: {h.Reason}");
+                    }
 
                     candidates.Add(new ClipCandidate
                     {
