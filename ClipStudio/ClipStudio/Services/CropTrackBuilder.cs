@@ -7,11 +7,38 @@ namespace ClipStudio.Services
 {
     public class CropTrackBuilder
     {
+        private const double MinFaceHeight = 0.06;
+        private const double GroupWindowSeconds = 1.0;
+        private const double MatchDistance = 0.12;
+        private const double SwitchAreaRatio = 1.3;
+        private const double SwitchDwellSeconds = 2.0;
+        private const double LostSeconds = 2.0;
+        private const double MinHoldSeconds = 2.0;
+        private const double ComfortHalfWidth = 0.03;
+        private const double CameraTau = 0.6;
+        private const double MaxPanSpeed = 0.15;
+        private const double DetectionStaleSeconds = 0.5;
+
         public class CropPoint
         {
             public double T { get; set; }
             public double Cx { get; set; }
             public double Cy { get; set; }
+        }
+
+        private class Participant
+        {
+            public double Cx;
+            public double Cy;
+            public double W;
+            public double H;
+            public double Area => W * H;
+        }
+
+        private class DetectionGroup
+        {
+            public double T;
+            public List<Participant> Participants = new List<Participant>();
         }
 
         public List<CropPoint> BuildTrack(List<FaceDetection> detections, double videoDuration, double fps, int sourceWidth, int sourceHeight)
@@ -36,85 +63,230 @@ namespace ClipStudio.Services
             double minCx = cropW / 2.0;
             double maxCx = 1.0 - (cropW / 2.0);
 
-            // Upgraded cinematic tracking parameters
-            double deadzone = 0.05; // Slightly larger deadzone to avoid micro-jitters
-
-            // Increased spring constant for a faster pan when target changes
-            double springConstant = 25.0; // Stiffness of the camera "spring"
-            double dampingRatio = 1.0; // Critically damped (no bouncing, just smooth arrival)
-            double dt = 1.0 / fps; // output fps integration step
-            double damping = 2.0 * Math.Sqrt(springConstant) * dampingRatio;
-
-            // Group detections by time (T). For multiple faces at the same timestamp, pick the largest one (nearest person).
-            var orderedDetections = detections
+            // Filter and group detections
+            var filteredDetections = detections.Where(d => d.H >= MinFaceHeight).ToList();
+            var groupedDetections = filteredDetections
                 .GroupBy(d => d.T)
-                .Select(g => g.OrderByDescending(d => d.W * d.H).First())
-                .OrderBy(d => d.T)
+                .Select(g =>
+                {
+                    double maxH = g.Max(d => d.H);
+                    var participants = g.Where(d => d.H >= 0.6 * maxH).Select(d => new Participant { Cx = d.Cx, Cy = d.Cy, W = d.W, H = d.H }).ToList();
+                    return new DetectionGroup { T = g.Key, Participants = participants };
+                })
+                .OrderBy(g => g.T)
                 .ToList();
 
-            double currentT = 0;
-            double currentCx = 0.5; // Start center
-            double currentCy = 0.5;
+            double dt = 1.0 / fps;
+            int totalSteps = (int)Math.Ceiling(videoDuration / dt) + 1;
 
-            double velocityX = 0;
-            double velocityY = 0;
+            // Pass 1: compute targets per output step
+            double[] stepTargets = new double[totalSteps];
+            bool[] stepSwitches = new bool[totalSteps];
 
-            double targetCx = 0.5;
-            double targetCy = 0.5;
+            bool hasInitialTarget = false;
+            double initialTarget = 0.5;
 
-            int detIndex = 0;
+            double target = 0.5;
+            bool groupMode = false;
+            Participant? tracked = null;
+            double challengeTimer = 0.0;
+            double lostTimer = 0.0;
+            double timeSinceLastSwitch = double.MaxValue;
 
-            while (currentT <= videoDuration)
+            for (int i = 0; i < totalSteps; i++)
             {
-                // Update target if we have passed the next detection
-                while (detIndex < orderedDetections.Count && orderedDetections[detIndex].T <= currentT)
-                {
-                    targetCx = orderedDetections[detIndex].Cx;
-                    targetCy = orderedDetections[detIndex].Cy;
-                    detIndex++;
-                }
+                double t = i * dt;
 
-                // Calculate spring physics for X
-                if (Math.Abs(targetCx - currentCx) > deadzone)
-                {
-                    double forceX = springConstant * (targetCx - currentCx) - damping * velocityX;
-                    velocityX += forceX * dt;
-                    currentCx += velocityX * dt;
-                }
-                else
-                {
-                    // Decay velocity if inside deadzone for super smooth stop
-                    velocityX *= 0.9;
-                    currentCx += velocityX * dt;
-                }
+                // Find latest fresh sample
+                var freshGroups = groupedDetections.Where(g => g.T <= t && (t - g.T) <= DetectionStaleSeconds).ToList();
+                var latestGroup = freshGroups.LastOrDefault();
 
-                // Calculate spring physics for Y
-                if (Math.Abs(targetCy - currentCy) > deadzone)
+                bool switchedThisStep = false;
+
+                if (latestGroup == null || latestGroup.Participants.Count == 0)
                 {
-                    double forceY = springConstant * (targetCy - currentCy) - damping * velocityY;
-                    velocityY += forceY * dt;
-                    currentCy += velocityY * dt;
+                    // No detections
+                    challengeTimer = 0.0;
+                    if (tracked != null && !groupMode)
+                    {
+                        lostTimer += dt;
+                    }
+                    timeSinceLastSwitch += dt;
                 }
                 else
                 {
-                    velocityY *= 0.9;
-                    currentCy += velocityY * dt;
+                    var participants = latestGroup.Participants;
+
+                    // Group mode condition
+                    var recentGroups = groupedDetections.Where(g => g.T <= t && (t - g.T) <= GroupWindowSeconds).ToList();
+                    double span = 0;
+                    if (recentGroups.Count > 0)
+                    {
+                        var allRecentParticipants = recentGroups.SelectMany(g => g.Participants).ToList();
+                        if (allRecentParticipants.Count > 0)
+                        {
+                            double left = allRecentParticipants.Min(p => p.Cx - p.W / 2);
+                            double right = allRecentParticipants.Max(p => p.Cx + p.W / 2);
+                            span = right - left;
+                        }
+                    }
+
+                    if (!groupMode && participants.Count >= 2 && span <= 0.85 * cropW)
+                    {
+                        groupMode = true;
+                        switchedThisStep = true;
+                        timeSinceLastSwitch = 0;
+                    }
+                    else if (groupMode && span > 0.95 * cropW)
+                    {
+                        groupMode = false;
+                        switchedThisStep = true;
+                        // entering single-subject from group mode -> largest participant as tracked
+                        tracked = participants.OrderByDescending(p => p.Area).First();
+                        challengeTimer = 0;
+                        lostTimer = 0;
+                        timeSinceLastSwitch = 0;
+                    }
+
+                    if (groupMode)
+                    {
+                        var allRecentParticipants = recentGroups.SelectMany(g => g.Participants).ToList();
+                        double left = allRecentParticipants.Min(p => p.Cx - p.W / 2);
+                        double right = allRecentParticipants.Max(p => p.Cx + p.W / 2);
+                        target = (left + right) / 2.0;
+                        challengeTimer = 0;
+                        lostTimer = 0;
+                    }
+                    else
+                    {
+                        // Single-subject mode
+                        if (tracked == null)
+                        {
+                            tracked = participants.OrderByDescending(p => p.Area).First();
+                            switchedThisStep = true;
+                            challengeTimer = 0;
+                            lostTimer = 0;
+                            timeSinceLastSwitch = 0;
+                        }
+
+                        Participant? match = participants
+                            .Where(p => Math.Abs(p.Cx - tracked.Cx) <= MatchDistance)
+                            .OrderBy(p => Math.Abs(p.Cx - tracked.Cx))
+                            .FirstOrDefault();
+
+                        if (match != null)
+                        {
+                            tracked = match;
+                            lostTimer = 0;
+                        }
+                        else
+                        {
+                            lostTimer += dt;
+                        }
+
+                        // Challenge logic
+                        if (match != null)
+                        {
+                            Participant? challenger = participants.Where(p => p != match).OrderByDescending(p => p.Area).FirstOrDefault();
+                            if (challenger != null && challenger.Area > SwitchAreaRatio * tracked.Area)
+                            {
+                                challengeTimer += dt;
+                            }
+                            else
+                            {
+                                challengeTimer = 0;
+                            }
+                        }
+                        else
+                        {
+                            challengeTimer = 0;
+                        }
+
+                        timeSinceLastSwitch += dt;
+
+                        // Switch conditions
+                        if (challengeTimer >= SwitchDwellSeconds && timeSinceLastSwitch >= MinHoldSeconds)
+                        {
+                            Participant challenger = participants.Where(p => p != match).OrderByDescending(p => p.Area).First();
+                            tracked = challenger;
+                            switchedThisStep = true;
+                            challengeTimer = 0;
+                            lostTimer = 0;
+                            timeSinceLastSwitch = 0;
+                        }
+                        else if (lostTimer >= LostSeconds)
+                        {
+                            tracked = participants.OrderByDescending(p => p.Area).First();
+                            switchedThisStep = true;
+                            challengeTimer = 0;
+                            lostTimer = 0;
+                            timeSinceLastSwitch = 0;
+                        }
+
+                        target = tracked.Cx;
+                    }
                 }
 
-                // Clamp to safe boundaries so 9:16 crop doesn't go out of bounds
-                currentCx = Math.Clamp(currentCx, minCx, maxCx);
+                target = Math.Clamp(target, minCx, maxCx);
 
-                // Keep Y locked to center for modern vertical video style unless dramatic change
-                currentCy = Math.Clamp(currentCy, 0.5, 0.5);
-
-                track.Add(new CropPoint
+                if (!hasInitialTarget && latestGroup != null && latestGroup.Participants.Count > 0)
                 {
-                    T = currentT,
-                    Cx = currentCx,
-                    Cy = currentCy
-                });
+                    hasInitialTarget = true;
+                    initialTarget = target;
+                    switchedThisStep = true; // First acquisition
+                }
 
-                currentT += dt;
+                stepTargets[i] = target;
+                stepSwitches[i] = switchedThisStep;
+            }
+
+            // Back-fill targets
+            if (hasInitialTarget)
+            {
+                for (int i = 0; i < totalSteps; i++)
+                {
+                    if (stepSwitches[i]) break; // Reached the first acquisition
+                    stepTargets[i] = initialTarget;
+                }
+            }
+            else
+            {
+                for (int i = 0; i < totalSteps; i++) stepTargets[i] = 0.5;
+            }
+
+            // Pass 2: Camera filter
+            double cam = stepTargets[0];
+            for (int i = 0; i < totalSteps; i++)
+            {
+                double t = i * dt;
+                target = stepTargets[i];
+
+                double err = target - cam;
+                double desired;
+                if (Math.Abs(err) <= ComfortHalfWidth)
+                {
+                    desired = cam;
+                }
+                else
+                {
+                    desired = cam + Math.Sign(err) * (Math.Abs(err) - ComfortHalfWidth);
+                }
+
+                if (stepSwitches[i] && Math.Abs(target - cam) > 0.8 * cropW)
+                {
+                    cam = target; // Hard cut
+                }
+                else
+                {
+                    double step = (desired - cam) * (1 - Math.Exp(-dt / CameraTau));
+                    double maxStep = MaxPanSpeed * dt;
+                    step = Math.Clamp(step, -maxStep, maxStep);
+                    cam += step;
+                }
+
+                cam = Math.Clamp(cam, minCx, maxCx);
+
+                track.Add(new CropPoint { T = t, Cx = cam, Cy = 0.5 });
             }
 
             return track;
