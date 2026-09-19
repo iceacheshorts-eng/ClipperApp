@@ -138,11 +138,53 @@ namespace ClipStudio.ViewModels
                 StatusText = "Analyzing Audio/Video...";
                 ProgressValue = 25;
 
-                // 3. Audio Loudness & AI Candidates (if available)
+                // 3. Audio Loudness & Transcribe (for AI Candidates)
                 var loudnessTask = videoAnalyzer.AnalyzeAudioLoudnessAsync(tempWavPath, token);
 
-                var aiService = new AIClipFinderService(Logger);
                 List<ClipCandidate>? aiCandidates = null;
+                var transcriptionService = new TranscriptionService(Logger);
+                var aiService = new AIClipFinderService(Logger);
+
+                try
+                {
+                    if (Environment.GetEnvironmentVariable(GroqConfig.EnvVarName) == null)
+                    {
+                        Logger.Log("Warning: GROQ_API_KEY environment variable missing. Falling back to heuristic.");
+                        aiCandidates = null;
+                    }
+                    else
+                    {
+                        var transcript = await transcriptionService.TranscribeAsync(tempWavPath, token);
+                        aiCandidates = await aiService.GetHighlightsAsync(transcript, ClipCount, 15.0, ClipLengthMultiplier, token);
+
+                        // Retry once if failed or empty
+                        if (aiCandidates == null || aiCandidates.Count == 0)
+                        {
+                            Logger.Log("Warning: AI highlight selector returned no clips. Retrying once...");
+                            aiCandidates = await aiService.GetHighlightsAsync(transcript, ClipCount, 15.0, ClipLengthMultiplier, token);
+                        }
+
+                        if (aiCandidates == null || aiCandidates.Count == 0)
+                        {
+                            Logger.Log("Warning: AI highlight selector returned no clips after retry. Falling back to heuristic.");
+                            aiCandidates = null;
+                        }
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (System.IO.FileNotFoundException ex)
+                {
+                    Logger.Log($"Warning: AI model missing. Falling back to heuristic. ({ex.Message})");
+                    aiCandidates = null;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Log($"Warning: AI highlight selector failed. Falling back to heuristic. ({ex.Message})");
+                    aiCandidates = null;
+                }
 
                 var loudnessScores = await loudnessTask;
                 ProgressValue = 50;
