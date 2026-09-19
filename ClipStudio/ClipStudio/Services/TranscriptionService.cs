@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using Whisper.net;
+using ClipStudio.Models;
 
 namespace ClipStudio.Services
 {
@@ -22,6 +23,82 @@ namespace ClipStudio.Services
         {
             _logger = logger;
             _modelPath = Path.Combine(AppContext.BaseDirectory, "Models", "ggml-base.en.bin");
+        }
+
+        public async Task<List<TranscriptSegment>> TranscribeAsync(string wavPath, CancellationToken cancellationToken)
+        {
+            if (!File.Exists(_modelPath))
+            {
+                _logger.Log($"AI model missing at {_modelPath}. Skipping transcription.");
+                throw new FileNotFoundException("Whisper model not found.");
+            }
+
+            _logger.Log("Transcribing audio...");
+            var segments = new List<TranscriptSegment>();
+
+            await Task.Run(async () =>
+            {
+                using var whisperFactory = WhisperFactory.FromPath(_modelPath);
+                using var processor = whisperFactory.CreateBuilder()
+                    .WithLanguage("en")
+                    .Build();
+
+                using var fileStream = File.OpenRead(wavPath);
+
+                var currentText = new System.Text.StringBuilder();
+                TimeSpan currentStart = TimeSpan.Zero;
+                TimeSpan currentEnd = TimeSpan.Zero;
+                int wordCount = 0;
+                int segmentIndex = 0;
+                bool isFirstInGroup = true;
+
+                await foreach (var segment in processor.ProcessAsync(fileStream, cancellationToken))
+                {
+                    if (isFirstInGroup)
+                    {
+                        currentStart = segment.Start;
+                        isFirstInGroup = false;
+                    }
+
+                    currentText.Append(segment.Text);
+                    currentEnd = segment.End;
+
+                    var trimmedText = segment.Text.Trim();
+                    int segmentWordCount = trimmedText.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Length;
+                    wordCount += segmentWordCount;
+
+                    bool endsWithPunctuation = trimmedText.EndsWith(".") || trimmedText.EndsWith("?") || trimmedText.EndsWith("!");
+                    bool isTooLong = (currentEnd - currentStart).TotalSeconds > 15;
+                    bool hasTooManyWords = wordCount > 40;
+
+                    if (endsWithPunctuation || isTooLong || hasTooManyWords)
+                    {
+                        segments.Add(new TranscriptSegment(
+                            segmentIndex++,
+                            currentStart,
+                            currentEnd,
+                            currentText.ToString().Trim()
+                        ));
+
+                        currentText.Clear();
+                        wordCount = 0;
+                        isFirstInGroup = true;
+                    }
+                }
+
+                if (currentText.Length > 0)
+                {
+                    segments.Add(new TranscriptSegment(
+                        segmentIndex++,
+                        currentStart,
+                        currentEnd,
+                        currentText.ToString().Trim()
+                    ));
+                }
+            }, cancellationToken);
+
+            _logger.Log($"Transcription complete. Created {segments.Count} sentence segments.");
+            return segments;
         }
 
         public async Task<List<CutSpan>> DetectFillerWordsAsync(string wavPath, CancellationToken cancellationToken)
