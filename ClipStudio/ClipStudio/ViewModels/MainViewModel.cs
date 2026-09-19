@@ -147,7 +147,7 @@ namespace ClipStudio.ViewModels
 
                 try
                 {
-                    if (Environment.GetEnvironmentVariable(GroqConfig.EnvVarName) == null)
+                    if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(GroqConfig.EnvVarName)))
                     {
                         Logger.Log("Warning: GROQ_API_KEY environment variable missing. Falling back to heuristic.");
                         aiCandidates = null;
@@ -157,16 +157,9 @@ namespace ClipStudio.ViewModels
                         var transcript = await transcriptionService.TranscribeAsync(tempWavPath, token);
                         aiCandidates = await aiService.GetHighlightsAsync(transcript, ClipCount, 15.0, ClipLengthMultiplier, token);
 
-                        // Retry once if failed or empty
                         if (aiCandidates == null || aiCandidates.Count == 0)
                         {
-                            Logger.Log("Warning: AI highlight selector returned no clips. Retrying once...");
-                            aiCandidates = await aiService.GetHighlightsAsync(transcript, ClipCount, 15.0, ClipLengthMultiplier, token);
-                        }
-
-                        if (aiCandidates == null || aiCandidates.Count == 0)
-                        {
-                            Logger.Log("Warning: AI highlight selector returned no clips after retry. Falling back to heuristic.");
+                            Logger.Log("Warning: AI highlight selector returned no clips. Falling back to heuristic.");
                             aiCandidates = null;
                         }
                     }
