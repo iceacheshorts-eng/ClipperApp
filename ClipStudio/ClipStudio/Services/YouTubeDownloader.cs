@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -24,23 +25,53 @@ namespace ClipStudio.Services
                 throw new FileNotFoundException($"yt-dlp.exe not found at {_ytDlpPath}. Please place it in the Binaries folder.");
             }
 
+            if (!Uri.TryCreate(url.Trim(), UriKind.Absolute, out var uri) || (uri.Scheme != Uri.UriSchemeHttp && uri.Scheme != Uri.UriSchemeHttps))
+            {
+                throw new ArgumentException("Invalid URL provided. Please provide a valid HTTP or HTTPS URL.", nameof(url));
+            }
+
             // Using quality parameter:
             // "1080p" -> "bestvideo[height<=1080]+bestaudio/best[height<=1080]"
             string format = $"bestvideo[height<={quality.Replace("p", "")}]+bestaudio/best[height<={quality.Replace("p", "")}]";
 
-            string finalFilePattern = Path.Combine(outputFolder, "%(title)s.%(ext)s");
-            string arguments = $"--no-playlist --newline -f \"{format}\" -o \"{finalFilePattern}\" \"{url}\" --ffmpeg-location \"{Path.Combine(AppContext.BaseDirectory, "Binaries")}\"";
+            var startInfo = new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = _ytDlpPath,
+                WorkingDirectory = outputFolder
+            };
+
+            startInfo.ArgumentList.Add("--no-playlist");
+            startInfo.ArgumentList.Add("--newline");
+            startInfo.ArgumentList.Add("-f");
+            startInfo.ArgumentList.Add(format);
+            startInfo.ArgumentList.Add("-o");
+            startInfo.ArgumentList.Add(Path.Combine(outputFolder, "%(id)s.%(ext)s"));
+            startInfo.ArgumentList.Add("--merge-output-format");
+            startInfo.ArgumentList.Add("mp4");
+            startInfo.ArgumentList.Add("-S");
+            startInfo.ArgumentList.Add("vcodec:h264,res,acodec:m4a");
+            startInfo.ArgumentList.Add("--print");
+            startInfo.ArgumentList.Add("after_move:CLIPSTUDIO_PATH=%(filepath)s");
+            startInfo.ArgumentList.Add("--progress");
+            startInfo.ArgumentList.Add("--ffmpeg-location");
+            startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "Binaries"));
+            startInfo.ArgumentList.Add("--");
+            startInfo.ArgumentList.Add(url);
 
             string? finalFilePath = null;
             Regex progressRegex = new Regex(@"\[download\]\s+(?<percent>\d+\.\d)%");
-            Regex destinationRegex = new Regex(@"\[download\] Destination: (?<path>.*)");
-            Regex mergingRegex = new Regex(@"\[Merger\] Merging formats into ""(?<path>.*)""");
-            Regex alreadyDownloadedRegex = new Regex(@"\[download\] (?<path>.*) has already been downloaded");
+            var recentLines = new Queue<string>();
 
-            _logger.Log($"Starting yt-dlp with arguments: {arguments}");
+            _logger.Log($"Starting yt-dlp with arguments: {string.Join(" ", startInfo.ArgumentList)}");
 
-            int exitCode = await ProcessUtils.RunProcessAsync(_ytDlpPath, arguments, outputFolder, line =>
+            int exitCode = await ProcessUtils.RunProcessAsync(startInfo, line =>
             {
+                recentLines.Enqueue(line);
+                if (recentLines.Count > 10)
+                {
+                    recentLines.Dequeue();
+                }
+
                 var progressMatch = progressRegex.Match(line);
                 if (progressMatch.Success)
                 {
@@ -50,46 +81,21 @@ namespace ClipStudio.Services
                     }
                 }
 
-                var destMatch = destinationRegex.Match(line);
-                if (destMatch.Success)
+                if (line.Trim().StartsWith("CLIPSTUDIO_PATH="))
                 {
-                    finalFilePath = destMatch.Groups["path"].Value.Trim();
-                }
-
-                var mergeMatch = mergingRegex.Match(line);
-                if (mergeMatch.Success)
-                {
-                    finalFilePath = mergeMatch.Groups["path"].Value.Trim();
-                }
-
-                var alreadyMatch = alreadyDownloadedRegex.Match(line);
-                if (alreadyMatch.Success)
-                {
-                    finalFilePath = alreadyMatch.Groups["path"].Value.Trim();
+                    finalFilePath = line.Trim().Substring("CLIPSTUDIO_PATH=".Length);
                 }
 
             }, cancellationToken);
 
             if (exitCode != 0)
             {
-                throw new Exception($"yt-dlp failed with exit code {exitCode}");
+                throw new Exception($"yt-dlp failed with exit code {exitCode}. Last output:\n{string.Join("\n", recentLines)}");
             }
 
             if (string.IsNullOrEmpty(finalFilePath) || !File.Exists(finalFilePath))
             {
-                // Fallback attempt to find the file if parsing failed.
-                // yt-dlp might not have printed the exact line we expect.
-                var files = Directory.GetFiles(outputFolder);
-                if (files.Length > 0)
-                {
-                    Array.Sort(files, (a, b) => File.GetCreationTime(b).CompareTo(File.GetCreationTime(a)));
-                    finalFilePath = files[0];
-                    _logger.Log($"Warning: Using most recently created file as fallback: {finalFilePath}");
-                }
-                else
-                {
-                    throw new FileNotFoundException("Could not determine the downloaded file path.");
-                }
+                throw new InvalidOperationException($"yt-dlp finished but reported no output file. Last output:\n{string.Join("\n", recentLines)}");
             }
 
             return finalFilePath;

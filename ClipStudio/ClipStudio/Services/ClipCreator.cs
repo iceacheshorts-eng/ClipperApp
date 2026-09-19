@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -43,11 +44,32 @@ namespace ClipStudio.Services
                 // STEP 1: Fast extract the un-cropped continuous clip segment with audio
                 // This ensures we have perfectly synced audio and a small file to process frame-by-frame.
                 // We do NOT filter filler words yet, so the timeline stays 1:1 with the crop track.
-                string extractArgs = $"-y -ss {clip.StartTime.TotalSeconds} -to {clip.EndTime.TotalSeconds} -i \"{sourceVideoPath}\" " +
-                                     $"-c:v libx264 -preset ultrafast -crf 18 -c:a aac -b:a 192k " +
-                                     $"\"{tempFullVideoPath}\"";
 
-                int extractExitCode = await ProcessUtils.RunProcessAsync(_ffmpegPath, extractArgs, workDir, _ => {}, cancellationToken);
+                var extractStartInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = _ffmpegPath,
+                    WorkingDirectory = workDir
+                };
+                extractStartInfo.ArgumentList.Add("-y");
+                extractStartInfo.ArgumentList.Add("-ss");
+                extractStartInfo.ArgumentList.Add(clip.StartTime.TotalSeconds.ToString(CultureInfo.InvariantCulture));
+                extractStartInfo.ArgumentList.Add("-to");
+                extractStartInfo.ArgumentList.Add(clip.EndTime.TotalSeconds.ToString(CultureInfo.InvariantCulture));
+                extractStartInfo.ArgumentList.Add("-i");
+                extractStartInfo.ArgumentList.Add(sourceVideoPath);
+                extractStartInfo.ArgumentList.Add("-c:v");
+                extractStartInfo.ArgumentList.Add("libx264");
+                extractStartInfo.ArgumentList.Add("-preset");
+                extractStartInfo.ArgumentList.Add("ultrafast");
+                extractStartInfo.ArgumentList.Add("-crf");
+                extractStartInfo.ArgumentList.Add("18");
+                extractStartInfo.ArgumentList.Add("-c:a");
+                extractStartInfo.ArgumentList.Add("aac");
+                extractStartInfo.ArgumentList.Add("-b:a");
+                extractStartInfo.ArgumentList.Add("192k");
+                extractStartInfo.ArgumentList.Add(tempFullVideoPath);
+
+                int extractExitCode = await ProcessUtils.RunProcessAsync(extractStartInfo, _ => {}, cancellationToken);
                 if (extractExitCode != 0) throw new Exception($"ffmpeg extraction failed with exit code {extractExitCode}");
 
                 // STEP 2: Use OpenCvSharp to read the extracted video, apply smooth dynamic cropping frame-by-frame, and pipe to FFmpeg.
@@ -66,11 +88,36 @@ namespace ClipStudio.Services
                     // Ensure targetWidth doesn't exceed frame width
                     targetWidth = Math.Min(targetWidth, width - width % 2);
 
-                    // Build filter for filler words to apply to the piped output
-                    string filterComplex = "";
-                    string mapArgs = "-map 0:v:0 -map 1:a:0?";
+                    var pipeStartInfo = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = _ffmpegPath,
+                        WorkingDirectory = workDir,
+                        RedirectStandardInput = true,
+                        RedirectStandardOutput = false,
+                        RedirectStandardError = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
 
-                    string vfArg = "";
+                    pipeStartInfo.ArgumentList.Add("-y");
+                    pipeStartInfo.ArgumentList.Add("-loglevel");
+                    pipeStartInfo.ArgumentList.Add("error");
+                    pipeStartInfo.ArgumentList.Add("-f");
+                    pipeStartInfo.ArgumentList.Add("rawvideo");
+                    pipeStartInfo.ArgumentList.Add("-vcodec");
+                    pipeStartInfo.ArgumentList.Add("rawvideo");
+                    pipeStartInfo.ArgumentList.Add("-s");
+                    pipeStartInfo.ArgumentList.Add($"{targetWidth}x{targetHeight}");
+                    pipeStartInfo.ArgumentList.Add("-r");
+                    pipeStartInfo.ArgumentList.Add(fps.ToString("R", CultureInfo.InvariantCulture));
+                    pipeStartInfo.ArgumentList.Add("-pix_fmt");
+                    pipeStartInfo.ArgumentList.Add("bgr24");
+                    pipeStartInfo.ArgumentList.Add("-i");
+                    pipeStartInfo.ArgumentList.Add("-");
+                    pipeStartInfo.ArgumentList.Add("-i");
+                    pipeStartInfo.ArgumentList.Add(tempFullVideoPath);
+
+                    bool hasFilterComplex = false;
                     if (fillerWords != null && fillerWords.Any())
                     {
                         var clipFillers = fillerWords
@@ -80,41 +127,48 @@ namespace ClipStudio.Services
                         if (clipFillers.Any())
                         {
                             var selectExpr = BuildSelectExpression(clip, clipFillers);
-                            filterComplex = $"-filter_complex \"[0:v]select='{selectExpr}',setpts=N/FRAME_RATE/TB,scale=1080:1920:flags=lanczos,format=yuv420p[vout];[1:a]aselect='{selectExpr}',asetpts=N/SR/TB[aout]\" ";
-                            mapArgs = "-map \"[vout]\" -map \"[aout]\"";
+                            pipeStartInfo.ArgumentList.Add("-filter_complex");
+                            pipeStartInfo.ArgumentList.Add($"[0:v]select='{selectExpr}',setpts=N/FRAME_RATE/TB,scale=1080:1920:flags=lanczos,format=yuv420p[vout];[1:a]aselect='{selectExpr}',asetpts=N/SR/TB[aout]");
+                            pipeStartInfo.ArgumentList.Add("-map");
+                            pipeStartInfo.ArgumentList.Add("[vout]");
+                            pipeStartInfo.ArgumentList.Add("-map");
+                            pipeStartInfo.ArgumentList.Add("[aout]");
+                            hasFilterComplex = true;
                         }
                     }
 
-                    if (string.IsNullOrEmpty(filterComplex))
+                    if (!hasFilterComplex)
                     {
-                        vfArg = "-vf scale=1080:1920:flags=lanczos,format=yuv420p ";
+                        pipeStartInfo.ArgumentList.Add("-vf");
+                        pipeStartInfo.ArgumentList.Add("scale=1080:1920:flags=lanczos,format=yuv420p");
+                        pipeStartInfo.ArgumentList.Add("-map");
+                        pipeStartInfo.ArgumentList.Add("0:v:0");
+                        pipeStartInfo.ArgumentList.Add("-map");
+                        pipeStartInfo.ArgumentList.Add("1:a:0?");
                     }
 
-                    // Start an ffmpeg process that reads raw BGR24 frames from stdin
-                    string pipeArgs = $"-y -loglevel error -f rawvideo -vcodec rawvideo -s {targetWidth}x{targetHeight} -r {fps} -pix_fmt bgr24 -i - " +
-                                      $"-i \"{tempFullVideoPath}\" " + // input 1 is original for audio
-                                      $"{filterComplex}{vfArg}{mapArgs} " +
-                                      $"-c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -movflags +faststart -c:a aac -b:a 128k " +
-                                      $"\"{outputFilePath}\"";
+                    pipeStartInfo.ArgumentList.Add("-c:v");
+                    pipeStartInfo.ArgumentList.Add("libx264");
+                    pipeStartInfo.ArgumentList.Add("-preset");
+                    pipeStartInfo.ArgumentList.Add("fast");
+                    pipeStartInfo.ArgumentList.Add("-crf");
+                    pipeStartInfo.ArgumentList.Add("23");
+                    pipeStartInfo.ArgumentList.Add("-pix_fmt");
+                    pipeStartInfo.ArgumentList.Add("yuv420p");
+                    pipeStartInfo.ArgumentList.Add("-movflags");
+                    pipeStartInfo.ArgumentList.Add("+faststart");
+                    pipeStartInfo.ArgumentList.Add("-c:a");
+                    pipeStartInfo.ArgumentList.Add("aac");
+                    pipeStartInfo.ArgumentList.Add("-b:a");
+                    pipeStartInfo.ArgumentList.Add("128k");
+                    pipeStartInfo.ArgumentList.Add(outputFilePath);
 
                     bool succeeded = false;
                     System.Diagnostics.Process? process = null;
 
                     try
                     {
-                        var processStartInfo = new System.Diagnostics.ProcessStartInfo
-                        {
-                            FileName = _ffmpegPath,
-                            Arguments = pipeArgs,
-                            RedirectStandardInput = true,
-                            RedirectStandardOutput = true,
-                            RedirectStandardError = true,
-                            UseShellExecute = false,
-                            CreateNoWindow = true,
-                            WorkingDirectory = workDir
-                        };
-
-                        process = new System.Diagnostics.Process { StartInfo = processStartInfo };
+                        process = new System.Diagnostics.Process { StartInfo = pipeStartInfo };
                         process.Start();
 
                         // Asynchronously consume standard error to avoid process deadlock
@@ -179,7 +233,14 @@ namespace ClipStudio.Services
                         }
 
                         // Close stdin to tell ffmpeg we are done sending frames
-                        process.StandardInput.Close();
+                        try
+                        {
+                            process.StandardInput.Close();
+                        }
+                        catch (IOException)
+                        {
+                            // Ignored
+                        }
                         process.WaitForExit();
 
                         if (process.ExitCode != 0)
@@ -194,7 +255,7 @@ namespace ClipStudio.Services
                     {
                         if (!succeeded)
                         {
-                            try { if (process is { HasExited: false }) process.Kill(entireProcessTree: true); } catch { }
+                            try { if (process is { HasExited: false }) { process.Kill(entireProcessTree: true); process.WaitForExit(3000); } } catch { }
                             try { if (File.Exists(outputFilePath)) File.Delete(outputFilePath); } catch { }
                         }
 
@@ -237,10 +298,13 @@ namespace ClipStudio.Services
             }
 
             var terms = keepSpans.Select(s =>
-                $"(t>={s.Start - clip.StartTime.TotalSeconds:F3}*t<{s.End - clip.StartTime.TotalSeconds:F3})"
-            );
+            {
+                double start = s.Start - clip.StartTime.TotalSeconds;
+                double end = s.End - clip.StartTime.TotalSeconds;
+                return FormattableString.Invariant($"(t>={start:F3}*t<{end:F3})");
+            });
 
-            return string.Join("+", terms).Replace("*", " * "); // plus means OR in ffmpeg select expression
+            return string.Join("+", terms); // plus means OR in ffmpeg select expression
         }
     }
 }
