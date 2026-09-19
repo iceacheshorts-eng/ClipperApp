@@ -12,6 +12,10 @@ namespace ClipStudio.Services
 {
     public class ClipCreator
     {
+        private const double BlurSigma = 6.0;
+        private const double BlurDimFactor = 0.55;
+        private const double BlurDownscaleDivisor = 10.0;
+
         private readonly IActivityLogger _logger;
         private readonly string _ffmpegPath;
 
@@ -107,7 +111,7 @@ namespace ClipStudio.Services
                     pipeStartInfo.ArgumentList.Add("-vcodec");
                     pipeStartInfo.ArgumentList.Add("rawvideo");
                     pipeStartInfo.ArgumentList.Add("-s");
-                    pipeStartInfo.ArgumentList.Add($"{targetWidth}x{targetHeight}");
+                    pipeStartInfo.ArgumentList.Add($"{CropMath.OutputWidth}x{CropMath.OutputHeight}");
                     pipeStartInfo.ArgumentList.Add("-r");
                     pipeStartInfo.ArgumentList.Add(fps.ToString("R", CultureInfo.InvariantCulture));
                     pipeStartInfo.ArgumentList.Add("-pix_fmt");
@@ -181,7 +185,13 @@ namespace ClipStudio.Services
                         int frameIndex = 0;
                         int trackIndex = 0;
 
-                        byte[]? frameBytes = null;
+                        int outBytesCount = CropMath.OutputWidth * CropMath.OutputHeight * 3;
+                        byte[] frameBytes = new byte[outBytesCount];
+
+                        using var outFrame = new OpenCvSharp.Mat(CropMath.OutputHeight, CropMath.OutputWidth, OpenCvSharp.MatType.CV_8UC3);
+                        using var panelTemp = new OpenCvSharp.Mat();
+                        using var blurBackgroundTemp = new OpenCvSharp.Mat();
+                        using var blurForegroundTemp = new OpenCvSharp.Mat();
 
                         while (capture.Read(frame) && !frame.Empty())
                         {
@@ -198,26 +208,22 @@ namespace ClipStudio.Services
 
                             var cropPoint = clipTrack.Count > 0 ? clipTrack[trackIndex] : null;
 
-                            double cx = cropPoint?.Cx ?? 0.5;
-                            double cy = cropPoint?.Cy ?? 0.5;
+                            CropLayout layout = cropPoint?.Layout ?? CropLayout.Single;
 
-                            // Calculate crop rectangle safely
-                            int x = (int)(cx * width - targetWidth / 2.0);
-                            int y = (int)(cy * height - targetHeight / 2.0);
-
-                            x = Math.Clamp(x, 0, width - targetWidth);
-                            y = Math.Clamp(y, 0, height - targetHeight);
-
-                            var cropRect = new OpenCvSharp.Rect(x, y, targetWidth, targetHeight);
-                            using var subMat = new OpenCvSharp.Mat(frame, cropRect);
-                            using var croppedFrame = subMat.Clone(); // Clone to guarantee contiguous memory stride
-
-                            int byteSize = (int)(croppedFrame.Total() * croppedFrame.ElemSize());
-                            if (frameBytes == null || frameBytes.Length != byteSize)
+                            if (layout == CropLayout.Single)
                             {
-                                frameBytes = new byte[byteSize];
+                                ComposeSingle(frame, outFrame, cropPoint, width, height, targetWidth, targetHeight);
                             }
-                            System.Runtime.InteropServices.Marshal.Copy(croppedFrame.Data, frameBytes, 0, frameBytes.Length);
+                            else if (layout == CropLayout.Stacked)
+                            {
+                                ComposeStacked(frame, outFrame, panelTemp, blurBackgroundTemp, blurForegroundTemp, cropPoint, width, height, targetWidth, targetHeight);
+                            }
+                            else
+                            {
+                                ComposeBlurFit(frame, outFrame, blurBackgroundTemp, blurForegroundTemp, width, height, targetWidth, targetHeight);
+                            }
+
+                            System.Runtime.InteropServices.Marshal.Copy(outFrame.Data, frameBytes, 0, frameBytes.Length);
 
                             try
                             {
@@ -276,6 +282,79 @@ namespace ClipStudio.Services
                     try { File.Delete(tempFullVideoPath); } catch { }
                 }
             }
+        }
+
+        private static void ComposeSingle(OpenCvSharp.Mat frame, OpenCvSharp.Mat outFrame, CropTrackBuilder.CropPoint? cropPoint, int width, int height, int targetWidth, int targetHeight)
+        {
+            double cx = cropPoint?.Cx ?? 0.5;
+            int x = (int)Math.Round(cx * width - targetWidth / 2.0);
+            x = Math.Clamp(x, 0, width - targetWidth);
+            var rect = new OpenCvSharp.Rect(x, 0, targetWidth, targetHeight);
+            using var crop = new OpenCvSharp.Mat(frame, rect);
+            OpenCvSharp.Cv2.Resize(crop, outFrame, new OpenCvSharp.Size(CropMath.OutputWidth, CropMath.OutputHeight), 0, 0, OpenCvSharp.InterpolationFlags.Lanczos4);
+        }
+
+        private static void ComposeStacked(OpenCvSharp.Mat frame, OpenCvSharp.Mat outFrame, OpenCvSharp.Mat panelTemp, OpenCvSharp.Mat blurBgTemp, OpenCvSharp.Mat blurFgTemp, CropTrackBuilder.CropPoint? cropPoint, int width, int height, int targetWidth, int targetHeight)
+        {
+            int regionW = CropMath.StackedRegionWidth(height);
+            if (regionW > width)
+            {
+                ComposeBlurFit(frame, outFrame, blurBgTemp, blurFgTemp, width, height, targetWidth, targetHeight);
+                return;
+            }
+
+            double cx1 = cropPoint?.Cx ?? 0.5;
+            double cx2 = cropPoint?.Cx2 ?? 0.5;
+
+            // Top panel
+            int x1 = (int)Math.Round(cx1 * width - regionW / 2.0);
+            x1 = Math.Clamp(x1, 0, width - regionW);
+            var rect1 = new OpenCvSharp.Rect(x1, 0, regionW, height);
+            using var crop1 = new OpenCvSharp.Mat(frame, rect1);
+            OpenCvSharp.Cv2.Resize(crop1, panelTemp, new OpenCvSharp.Size(CropMath.OutputWidth, CropMath.PanelHeight), 0, 0, OpenCvSharp.InterpolationFlags.Area);
+            var outRect1 = new OpenCvSharp.Rect(0, 0, CropMath.OutputWidth, CropMath.PanelHeight);
+            using var outRoi1 = new OpenCvSharp.Mat(outFrame, outRect1);
+            panelTemp.CopyTo(outRoi1);
+
+            // Bottom panel
+            int x2 = (int)Math.Round(cx2 * width - regionW / 2.0);
+            x2 = Math.Clamp(x2, 0, width - regionW);
+            var rect2 = new OpenCvSharp.Rect(x2, 0, regionW, height);
+            using var crop2 = new OpenCvSharp.Mat(frame, rect2);
+            OpenCvSharp.Cv2.Resize(crop2, panelTemp, new OpenCvSharp.Size(CropMath.OutputWidth, CropMath.PanelHeight), 0, 0, OpenCvSharp.InterpolationFlags.Area);
+            var outRect2 = new OpenCvSharp.Rect(0, CropMath.PanelHeight, CropMath.OutputWidth, CropMath.PanelHeight);
+            using var outRoi2 = new OpenCvSharp.Mat(outFrame, outRect2);
+            panelTemp.CopyTo(outRoi2);
+        }
+
+        private static void ComposeBlurFit(OpenCvSharp.Mat frame, OpenCvSharp.Mat outFrame, OpenCvSharp.Mat blurBgTemp, OpenCvSharp.Mat blurFgTemp, int width, int height, int targetWidth, int targetHeight)
+        {
+            int fgH = (int)Math.Round(height * CropMath.OutputWidth / (double)width);
+            if (fgH > CropMath.OutputHeight)
+            {
+                ComposeSingle(frame, outFrame, null, width, height, targetWidth, targetHeight);
+                return;
+            }
+
+            // Background blur
+            int bgX = (width - targetWidth) / 2;
+            var bgRect = new OpenCvSharp.Rect(bgX, 0, targetWidth, height);
+            using var bgCrop = new OpenCvSharp.Mat(frame, bgRect);
+
+            int blurW = (int)(CropMath.OutputWidth / BlurDownscaleDivisor);
+            int blurH = (int)(CropMath.OutputHeight / BlurDownscaleDivisor);
+
+            OpenCvSharp.Cv2.Resize(bgCrop, blurBgTemp, new OpenCvSharp.Size(blurW, blurH), 0, 0, OpenCvSharp.InterpolationFlags.Area);
+            OpenCvSharp.Cv2.GaussianBlur(blurBgTemp, blurBgTemp, new OpenCvSharp.Size(0, 0), BlurSigma);
+            OpenCvSharp.Cv2.Resize(blurBgTemp, outFrame, new OpenCvSharp.Size(CropMath.OutputWidth, CropMath.OutputHeight), 0, 0, OpenCvSharp.InterpolationFlags.Linear);
+            OpenCvSharp.Cv2.ConvertScaleAbs(outFrame, outFrame, BlurDimFactor, 0);
+
+            // Foreground center
+            OpenCvSharp.Cv2.Resize(frame, blurFgTemp, new OpenCvSharp.Size(CropMath.OutputWidth, fgH), 0, 0, OpenCvSharp.InterpolationFlags.Area);
+            int y = (CropMath.OutputHeight - fgH) / 2;
+            var fgRect = new OpenCvSharp.Rect(0, y, CropMath.OutputWidth, fgH);
+            using var outRoi = new OpenCvSharp.Mat(outFrame, fgRect);
+            blurFgTemp.CopyTo(outRoi);
         }
 
         private string BuildSelectExpression(ClipCandidate clip, List<TranscriptionService.CutSpan> fillers)
