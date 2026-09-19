@@ -34,10 +34,10 @@ namespace ClipStudio.Services
 
             _logger.Log($"Rendering clip [{clip.StartTime:hh\\:mm\\:ss} - {clip.EndTime:hh\\:mm\\:ss}] with advanced dynamic frame cropping to {Path.GetFileName(outputFilePath)}");
 
-            string workDir = Path.GetDirectoryName(sourceVideoPath) ?? "";
+            string workDir = TempPaths.GetTempDir();
 
             // Temporary files for the 2-step process
-            string tempFullVideoPath = Path.Combine(workDir, $"temp_full_{Guid.NewGuid()}.mp4");
+            string tempFullVideoPath = TempPaths.NewTempFile(".mp4");
 
             try
             {

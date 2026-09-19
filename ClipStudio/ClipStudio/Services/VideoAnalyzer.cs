@@ -27,14 +27,14 @@ namespace ClipStudio.Services
             if (!File.Exists(_ffmpegPath))
                 throw new FileNotFoundException($"ffmpeg.exe not found at {_ffmpegPath}");
 
-            string wavPath = Path.Combine(Path.GetDirectoryName(videoPath) ?? "", Path.GetFileNameWithoutExtension(videoPath) + "_audio.wav");
+            string wavPath = TempPaths.NewTempFile(".wav");
 
             _logger.Log("Extracting audio to WAV...");
 
             var startInfo = new System.Diagnostics.ProcessStartInfo
             {
                 FileName = _ffmpegPath,
-                WorkingDirectory = Path.GetDirectoryName(videoPath) ?? ""
+                WorkingDirectory = TempPaths.GetTempDir()
             };
             startInfo.ArgumentList.Add("-y");
             startInfo.ArgumentList.Add("-i");
