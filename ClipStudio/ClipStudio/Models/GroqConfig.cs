@@ -4,6 +4,7 @@ namespace ClipStudio.Models
     {
         public const string EnvVarName = "GROQ_API_KEY";
         public const string BaseUrl = "https://api.groq.com/openai/v1/chat/completions";
-        public const string ModelId = "llama3-70b-8192";
+        // Recommended model based on https://console.groq.com/docs/deprecations
+        public const string ModelId = "openai/gpt-oss-20b";
     }
 }

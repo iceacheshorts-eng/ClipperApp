@@ -86,6 +86,7 @@ namespace ClipStudio.Services
             promptText.AppendLine($"Choose self-contained moments that start and end on complete thoughts.");
             promptText.AppendLine($"The ideal length for each clip is between {minSeconds} and {maxSeconds} seconds, but focus on the complete thought.");
             promptText.AppendLine("Format the output as a JSON array of objects, with each object having properties: StartSegment (int), EndSegment (int), Score (float 0.0-1.0), and Reason (short string).");
+            promptText.AppendLine("Use the numbers in square brackets exactly as shown. Do not renumber.");
             promptText.AppendLine("Here is the numbered transcript:\n");
 
             foreach (var seg in chunk)
@@ -100,13 +101,50 @@ namespace ClipStudio.Services
                 {
                     new { role = "user", content = promptText.ToString() }
                 },
-                response_format = new { type = "json_object" }
+                response_format = new
+                {
+                    type = "json_schema",
+                    json_schema = new
+                    {
+                        name = "highlights_schema",
+                        strict = true,
+                        schema = new
+                        {
+                            type = "object",
+                            properties = new
+                            {
+                                highlights = new
+                                {
+                                    type = "array",
+                                    items = new
+                                    {
+                                        type = "object",
+                                        properties = new
+                                        {
+                                            startSegment = new { type = "integer" },
+                                            endSegment = new { type = "integer" },
+                                            score = new { type = "number" },
+                                            reason = new { type = "string" }
+                                        },
+                                        required = new[] { "startSegment", "endSegment", "score", "reason" },
+                                        additionalProperties = false
+                                    }
+                                }
+                            },
+                            required = new[] { "highlights" },
+                            additionalProperties = false
+                        }
+                    }
+                }
             };
 
             var requestJson = JsonSerializer.Serialize(payload);
             using var content = new StringContent(requestJson, Encoding.UTF8, "application/json");
 
             HttpResponseMessage? response = null;
+            var minIndex = chunk.Count > 0 ? chunk[0].Index : 0;
+            var maxIndex = chunk.Count > 0 ? chunk[^1].Index : 0;
+
             try
             {
                 using var request = new HttpRequestMessage(HttpMethod.Post, GroqConfig.BaseUrl);
@@ -115,18 +153,41 @@ namespace ClipStudio.Services
                 
                 response = await _httpClient.SendAsync(request, ct);
                 
-                if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                if (!response.IsSuccessStatusCode)
                 {
-                    var retryAfter = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(5);
-                    _logger.Log($"Rate limited by Groq API. Retrying after {retryAfter.TotalSeconds} seconds...");
-                    await Task.Delay(retryAfter, ct);
+                    var responseBody = await response.Content.ReadAsStringAsync(ct);
+                    var truncatedBody = responseBody.Length > 300 ? responseBody.Substring(0, 300) : responseBody;
+                    _logger.Log($"Groq API error: {(int)response.StatusCode} - {truncatedBody}");
 
-                    // Recreate request because it was disposed
-                    using var retryRequest = new HttpRequestMessage(HttpMethod.Post, GroqConfig.BaseUrl);
-                    retryRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-                    retryRequest.Content = new StringContent(requestJson, Encoding.UTF8, "application/json");
-                    
-                    response = await _httpClient.SendAsync(retryRequest, ct);
+                    if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                    {
+                        var retryAfter = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(5);
+                        _logger.Log($"Rate limited by Groq API. Retrying after {retryAfter.TotalSeconds} seconds...");
+                        await Task.Delay(retryAfter, ct);
+
+                        // Recreate request because it was disposed
+                        using var retryRequest = new HttpRequestMessage(HttpMethod.Post, GroqConfig.BaseUrl);
+                        retryRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+                        retryRequest.Content = new StringContent(requestJson, Encoding.UTF8, "application/json");
+
+                        response = await _httpClient.SendAsync(retryRequest, ct);
+                    }
+                    else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest ||
+                             response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                             response.StatusCode == System.Net.HttpStatusCode.Forbidden ||
+                             response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                    {
+                        throw new GroqApiException($"Configuration error: {(int)response.StatusCode} - {truncatedBody}");
+                    }
+                    else if ((int)response.StatusCode >= 500)
+                    {
+                        _logger.Log($"Server error {(int)response.StatusCode} from Groq API. Skipping chunk.");
+                        return new List<ClipCandidate>();
+                    }
+                    else
+                    {
+                         // Other non-success, maybe skip or throw? We'll let EnsureSuccessStatusCode catch it or just throw
+                    }
                 }
 
                 response.EnsureSuccessStatusCode();
@@ -176,8 +237,14 @@ namespace ClipStudio.Services
                 var candidates = new List<ClipCandidate>();
                 foreach (var h in highlights)
                 {
-                    if (h.StartSegment < 0 || h.EndSegment >= fullTranscript.Count || h.StartSegment > h.EndSegment)
+                    if (!(minIndex <= h.StartSegment && h.StartSegment <= h.EndSegment && h.EndSegment <= maxIndex))
+                    {
+                        _logger.Log($"Rejecting highlight: indices out of chunk bounds ({h.StartSegment}-{h.EndSegment} not in {minIndex}-{maxIndex})");
                         continue; // Invalid range
+                    }
+
+                    if (h.StartSegment < 0 || h.EndSegment >= fullTranscript.Count)
+                        continue; // Extra safety
 
                     var startSeg = fullTranscript[h.StartSegment];
                     var endSeg = fullTranscript[h.EndSegment];
@@ -188,13 +255,57 @@ namespace ClipStudio.Services
 
                     var duration = (actualEnd - actualStart).TotalSeconds;
 
-                    // Clamp duration
-                    if (duration < minSeconds * 0.6)
-                        continue; // Too short
-                    if (duration > maxSeconds * 1.3)
+                    // Check if too long
+                    double maxLimitSeconds = maxSeconds * 1.3;
+                    if (duration > maxLimitSeconds)
                     {
-                        // Too long, clamp it
-                        actualEnd = actualStart + TimeSpan.FromSeconds(maxSeconds * 1.3);
+                        var maxEndTime = actualStart + TimeSpan.FromSeconds(maxLimitSeconds);
+                        TimeSpan? newActualEnd = null;
+
+                        // Walk backwards from h.EndSegment to h.StartSegment
+                        for (int i = h.EndSegment; i >= h.StartSegment; i--)
+                        {
+                            var seg = fullTranscript[i];
+                            if (seg.End <= maxEndTime)
+                            {
+                                var segText = seg.Text.TrimEnd();
+                                if (segText.EndsWith(".") || segText.EndsWith("!") || segText.EndsWith("?"))
+                                {
+                                    newActualEnd = seg.End;
+                                    break;
+                                }
+                            }
+                        }
+
+                        // If no punctuation found, just take the last segment within the limit
+                        if (newActualEnd == null)
+                        {
+                            for (int i = h.EndSegment; i >= h.StartSegment; i--)
+                            {
+                                var seg = fullTranscript[i];
+                                if (seg.End <= maxEndTime)
+                                {
+                                    newActualEnd = seg.End;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (newActualEnd == null)
+                        {
+                            _logger.Log("Rejecting highlight: no segment end found within max duration limit.");
+                            continue;
+                        }
+
+                        actualEnd = newActualEnd.Value;
+                        duration = (actualEnd - actualStart).TotalSeconds;
+                    }
+
+                    // Final duration check
+                    if (duration < minSeconds * 0.6)
+                    {
+                        _logger.Log($"Rejecting highlight: duration ({duration}s) is too short.");
+                        continue;
                     }
 
                     // Build transcript text
@@ -213,6 +324,14 @@ namespace ClipStudio.Services
 
                 return candidates;
             }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (GroqApiException)
+            {
+                throw;
+            }
             catch (Exception ex)
             {
                 _logger.Log($"LLM AI Clip finding chunk failed: {ex.Message}. Skipping chunk.");
@@ -220,6 +339,11 @@ namespace ClipStudio.Services
             }
         }
         
+        private class GroqApiException : Exception
+        {
+            public GroqApiException(string message) : base(message) { }
+        }
+
         private List<List<TranscriptSegment>> ChunkTranscript(IReadOnlyList<TranscriptSegment> transcript, int maxSentences)
         {
             var chunks = new List<List<TranscriptSegment>>();
