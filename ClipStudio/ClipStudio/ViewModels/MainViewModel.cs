@@ -63,6 +63,36 @@ namespace ClipStudio.ViewModels
             Logger = logger;
         }
 
+        private (int Width, int Height, double Fps) ReadVideoInfo(string path)
+        {
+            try
+            {
+                using var capture = new OpenCvSharp.VideoCapture(path);
+                if (!capture.IsOpened())
+                {
+                    Logger.Log($"Warning: Could not open video at {path} for info extraction. Using default 1920x1080@30fps.");
+                    return (1920, 1080, 30.0);
+                }
+
+                int width = capture.FrameWidth;
+                int height = capture.FrameHeight;
+                double fps = capture.Fps;
+
+                if (width <= 0 || height <= 0 || fps <= 0)
+                {
+                    Logger.Log($"Warning: Invalid video info extracted from {path} (W:{width}, H:{height}, FPS:{fps}). Using default 1920x1080@30fps.");
+                    return (1920, 1080, 30.0);
+                }
+
+                return (width, height, fps);
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"Warning: Error reading video info from {path} ({ex.Message}). Using default 1920x1080@30fps.");
+                return (1920, 1080, 30.0);
+            }
+        }
+
         [RelayCommand]
         private void BrowseSource()
         {
@@ -193,8 +223,9 @@ namespace ClipStudio.ViewModels
                 }
                 catch (System.IO.FileNotFoundException) { }
 
+                var videoInfo = ReadVideoInfo(videoPath);
                 var trackBuilder = new CropTrackBuilder();
-                _cropTrack = trackBuilder.BuildTrack(detections, (loudnessScores.Count * 1.0), 30); // Approx duration
+                _cropTrack = trackBuilder.BuildTrack(detections, (loudnessScores.Count * 1.0), videoInfo.Fps, videoInfo.Width, videoInfo.Height); // Approx duration
 
                 // 5. Generate candidate clips
                 StatusText = "Finding Highlights...";

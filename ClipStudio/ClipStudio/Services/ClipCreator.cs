@@ -62,14 +62,15 @@ namespace ClipStudio.Services
 
                     // Calculate target vertical crop dimensions
                     int targetHeight = height;
-                    int targetWidth = (int)(height * 9.0 / 16.0);
-                    // Ensure even dimensions
-                    if (targetWidth % 2 != 0) targetWidth--;
+                    int targetWidth = CropMath.TargetWidth(height);
+                    // Ensure targetWidth doesn't exceed frame width
+                    targetWidth = Math.Min(targetWidth, width - width % 2);
 
                     // Build filter for filler words to apply to the piped output
                     string filterComplex = "";
                     string mapArgs = "-map 0:v:0 -map 1:a:0?";
 
+                    string vfArg = "";
                     if (fillerWords != null && fillerWords.Any())
                     {
                         var clipFillers = fillerWords
@@ -79,102 +80,128 @@ namespace ClipStudio.Services
                         if (clipFillers.Any())
                         {
                             var selectExpr = BuildSelectExpression(clip, clipFillers);
-                            filterComplex = $"-filter_complex \"[0:v]select='{selectExpr}',setpts=N/FRAME_RATE/TB[vout];[1:a]aselect='{selectExpr}',asetpts=N/SR/TB[aout]\" ";
+                            filterComplex = $"-filter_complex \"[0:v]select='{selectExpr}',setpts=N/FRAME_RATE/TB,scale=1080:1920:flags=lanczos,format=yuv420p[vout];[1:a]aselect='{selectExpr}',asetpts=N/SR/TB[aout]\" ";
                             mapArgs = "-map \"[vout]\" -map \"[aout]\"";
                         }
+                    }
+
+                    if (string.IsNullOrEmpty(filterComplex))
+                    {
+                        vfArg = "-vf scale=1080:1920:flags=lanczos,format=yuv420p ";
                     }
 
                     // Start an ffmpeg process that reads raw BGR24 frames from stdin
                     string pipeArgs = $"-y -loglevel error -f rawvideo -vcodec rawvideo -s {targetWidth}x{targetHeight} -r {fps} -pix_fmt bgr24 -i - " +
                                       $"-i \"{tempFullVideoPath}\" " + // input 1 is original for audio
-                                      $"{filterComplex}{mapArgs} " +
-                                      $"-c:v libx264 -preset fast -crf 23 -c:a aac -b:a 128k " +
+                                      $"{filterComplex}{vfArg}{mapArgs} " +
+                                      $"-c:v libx264 -preset fast -crf 23 -pix_fmt yuv420p -movflags +faststart -c:a aac -b:a 128k " +
                                       $"\"{outputFilePath}\"";
 
-                    var processStartInfo = new System.Diagnostics.ProcessStartInfo
+                    bool succeeded = false;
+                    System.Diagnostics.Process? process = null;
+
+                    try
                     {
-                        FileName = _ffmpegPath,
-                        Arguments = pipeArgs,
-                        RedirectStandardInput = true,
-                        RedirectStandardOutput = true,
-                        RedirectStandardError = true,
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                        WorkingDirectory = workDir
-                    };
-
-                    using var process = new System.Diagnostics.Process { StartInfo = processStartInfo };
-                    process.Start();
-
-                    // Asynchronously consume standard error to avoid process deadlock
-                    var errorLogTask = process.StandardError.ReadToEndAsync();
-
-                    // Pre-filter the crop track for this clip to optimize lookup
-                    var clipTrack = cropTrack.Where(p => p.T >= clip.StartTime.TotalSeconds && p.T <= clip.EndTime.TotalSeconds).OrderBy(p => p.T).ToList();
-
-                    using var frame = new OpenCvSharp.Mat();
-                    int frameIndex = 0;
-                    int trackIndex = 0;
-                    
-                    byte[]? frameBytes = null;
-
-                    while (capture.Read(frame) && !frame.Empty())
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-
-                        double currentVideoTime = frameIndex / fps;
-                        double absoluteTime = clip.StartTime.TotalSeconds + currentVideoTime;
-
-                        // Advance track index directly instead of OrderBy
-                        while (trackIndex < clipTrack.Count - 1 && clipTrack[trackIndex + 1].T <= absoluteTime)
+                        var processStartInfo = new System.Diagnostics.ProcessStartInfo
                         {
-                            trackIndex++;
+                            FileName = _ffmpegPath,
+                            Arguments = pipeArgs,
+                            RedirectStandardInput = true,
+                            RedirectStandardOutput = true,
+                            RedirectStandardError = true,
+                            UseShellExecute = false,
+                            CreateNoWindow = true,
+                            WorkingDirectory = workDir
+                        };
+
+                        process = new System.Diagnostics.Process { StartInfo = processStartInfo };
+                        process.Start();
+
+                        // Asynchronously consume standard error to avoid process deadlock
+                        var errorLogTask = process.StandardError.ReadToEndAsync();
+
+                        // Pre-filter the crop track for this clip to optimize lookup
+                        var clipTrack = cropTrack.Where(p => p.T >= clip.StartTime.TotalSeconds && p.T <= clip.EndTime.TotalSeconds).OrderBy(p => p.T).ToList();
+
+                        using var frame = new OpenCvSharp.Mat();
+                        int frameIndex = 0;
+                        int trackIndex = 0;
+
+                        byte[]? frameBytes = null;
+
+                        while (capture.Read(frame) && !frame.Empty())
+                        {
+                            cancellationToken.ThrowIfCancellationRequested();
+
+                            double currentVideoTime = frameIndex / fps;
+                            double absoluteTime = clip.StartTime.TotalSeconds + currentVideoTime;
+
+                            // Advance track index directly instead of OrderBy
+                            while (trackIndex < clipTrack.Count - 1 && clipTrack[trackIndex + 1].T <= absoluteTime)
+                            {
+                                trackIndex++;
+                            }
+
+                            var cropPoint = clipTrack.Count > 0 ? clipTrack[trackIndex] : null;
+
+                            double cx = cropPoint?.Cx ?? 0.5;
+                            double cy = cropPoint?.Cy ?? 0.5;
+
+                            // Calculate crop rectangle safely
+                            int x = (int)(cx * width - targetWidth / 2.0);
+                            int y = (int)(cy * height - targetHeight / 2.0);
+
+                            x = Math.Clamp(x, 0, width - targetWidth);
+                            y = Math.Clamp(y, 0, height - targetHeight);
+
+                            var cropRect = new OpenCvSharp.Rect(x, y, targetWidth, targetHeight);
+                            using var subMat = new OpenCvSharp.Mat(frame, cropRect);
+                            using var croppedFrame = subMat.Clone(); // Clone to guarantee contiguous memory stride
+
+                            int byteSize = (int)(croppedFrame.Total() * croppedFrame.ElemSize());
+                            if (frameBytes == null || frameBytes.Length != byteSize)
+                            {
+                                frameBytes = new byte[byteSize];
+                            }
+                            System.Runtime.InteropServices.Marshal.Copy(croppedFrame.Data, frameBytes, 0, frameBytes.Length);
+
+                            try
+                            {
+                                process.StandardInput.BaseStream.Write(frameBytes, 0, frameBytes.Length);
+                            }
+                            catch (IOException)
+                            {
+                                // ffmpeg process ended unexpectedly
+                                break;
+                            }
+
+                            frameIndex++;
                         }
 
-                        var cropPoint = clipTrack.Count > 0 ? clipTrack[trackIndex] : null;
+                        // Close stdin to tell ffmpeg we are done sending frames
+                        process.StandardInput.Close();
+                        process.WaitForExit();
 
-                        double cx = cropPoint?.Cx ?? 0.5;
-                        double cy = cropPoint?.Cy ?? 0.5;
-
-                        // Calculate crop rectangle safely
-                        int x = (int)(cx * width - targetWidth / 2.0);
-                        int y = (int)(cy * height - targetHeight / 2.0);
-
-                        x = Math.Clamp(x, 0, width - targetWidth);
-                        y = Math.Clamp(y, 0, height - targetHeight);
-
-                        var cropRect = new OpenCvSharp.Rect(x, y, targetWidth, targetHeight);
-                        using var subMat = new OpenCvSharp.Mat(frame, cropRect);
-                        using var croppedFrame = subMat.Clone(); // Clone to guarantee contiguous memory stride
-
-                        int byteSize = (int)(croppedFrame.Total() * croppedFrame.ElemSize());
-                        if (frameBytes == null || frameBytes.Length != byteSize)
+                        if (process.ExitCode != 0)
                         {
-                            frameBytes = new byte[byteSize];
-                        }
-                        System.Runtime.InteropServices.Marshal.Copy(croppedFrame.Data, frameBytes, 0, frameBytes.Length);
-
-                        try
-                        {
-                            process.StandardInput.BaseStream.Write(frameBytes, 0, frameBytes.Length);
-                        }
-                        catch (IOException)
-                        {
-                            // ffmpeg process ended unexpectedly
-                            break;
+                            string errorLog = errorLogTask.Result;
+                            throw new Exception($"ffmpeg piping failed with exit code {process.ExitCode}. Error: {errorLog}");
                         }
 
-                        frameIndex++;
+                        succeeded = true;
                     }
-
-                    // Close stdin to tell ffmpeg we are done sending frames
-                    process.StandardInput.Close();
-                    process.WaitForExit();
-
-                    if (process.ExitCode != 0)
+                    finally
                     {
-                        string errorLog = errorLogTask.Result;
-                        throw new Exception($"ffmpeg piping failed with exit code {process.ExitCode}. Error: {errorLog}");
+                        if (!succeeded)
+                        {
+                            try { if (process is { HasExited: false }) process.Kill(entireProcessTree: true); } catch { }
+                            try { if (File.Exists(outputFilePath)) File.Delete(outputFilePath); } catch { }
+                        }
+
+                        if (process != null)
+                        {
+                            process.Dispose();
+                        }
                     }
 
                 }, cancellationToken);
