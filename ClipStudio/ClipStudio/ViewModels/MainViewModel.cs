@@ -37,6 +37,12 @@ namespace ClipStudio.ViewModels
         private double _clipLengthMultiplier = 60.0; // 60 seconds
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(ManualLengthEnabled))]
+        private bool _autoClipEnabled = true;
+
+        public bool ManualLengthEnabled => !AutoClipEnabled;
+
+        [ObservableProperty]
         private bool _reviewClipsEnabled = true;
 
         [ObservableProperty]
@@ -59,9 +65,32 @@ namespace ClipStudio.ViewModels
         private List<TranscriptionService.CutSpan>? _fillerWords;
         private bool _isRendering = false;
 
+        private const string DefaultOutputFolderName = "output";
+
+        private static string GetDefaultOutputFolder()
+        {
+            return System.IO.Path.Combine(AppContext.BaseDirectory, DefaultOutputFolderName);
+        }
+
+        private bool TryEnsureFolder(string path)
+        {
+            try
+            {
+                System.IO.Directory.CreateDirectory(path);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Logger.Log($"Error creating output folder '{path}': {ex.Message}");
+                return false;
+            }
+        }
+
         public MainViewModel(IActivityLogger logger)
         {
             Logger = logger;
+            OutputFolder = GetDefaultOutputFolder();
+            TryEnsureFolder(OutputFolder);
             try
             {
                 TempPaths.CleanupStale();
@@ -154,9 +183,20 @@ namespace ClipStudio.ViewModels
         [RelayCommand]
         private async Task StartAsync()
         {
-            if (string.IsNullOrWhiteSpace(SourcePath) || string.IsNullOrWhiteSpace(OutputFolder))
+            if (string.IsNullOrWhiteSpace(SourcePath))
             {
-                Logger.Log("Source and Output Folder must be specified.");
+                Logger.Log("Source must be specified.");
+                return;
+            }
+
+            if (string.IsNullOrWhiteSpace(OutputFolder))
+            {
+                OutputFolder = GetDefaultOutputFolder();
+                Logger.Log($"No output folder selected; using default: {OutputFolder}");
+            }
+
+            if (!TryEnsureFolder(OutputFolder))
+            {
                 return;
             }
 
@@ -222,7 +262,17 @@ namespace ClipStudio.ViewModels
                     else
                     {
                         var transcript = await transcriptionService.TranscribeAsync(tempWavPath, token);
-                        aiCandidates = await aiService.GetHighlightsAsync(transcript, ClipCount, 15.0, ClipLengthMultiplier, token);
+
+                        if (AutoClipEnabled)
+                        {
+                            Logger.Log("AI Automated Clip mode is ON (AI picks length 15-60s).");
+                        }
+                        else
+                        {
+                            Logger.Log("AI Automated Clip mode is OFF.");
+                        }
+
+                        aiCandidates = await aiService.GetHighlightsAsync(transcript, ClipCount, 15.0, ClipLengthMultiplier, AutoClipEnabled, token);
 
                         if (aiCandidates == null || aiCandidates.Count == 0)
                         {
@@ -268,7 +318,9 @@ namespace ClipStudio.ViewModels
                 StatusText = "Finding Highlights...";
                 List<ClipCandidate> candidates = aiCandidates != null && aiCandidates.Count > 0
                     ? aiCandidates
-                    : videoAnalyzer.GenerateCandidates(loudnessScores, detections, SelectedContentStyle, ClipCount, ClipLengthMultiplier);
+                    : (AutoClipEnabled
+                        ? videoAnalyzer.GenerateAutoLengthCandidates(loudnessScores, detections, SelectedContentStyle, ClipCount)
+                        : videoAnalyzer.GenerateCandidates(loudnessScores, detections, SelectedContentStyle, ClipCount, ClipLengthMultiplier));
 
                 // Keep only required number
                 candidates = candidates.OrderByDescending(c => c.Score).Take(ClipCount).OrderBy(c => c.StartTime).ToList();
