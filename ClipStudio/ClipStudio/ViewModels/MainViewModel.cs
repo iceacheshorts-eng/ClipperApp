@@ -57,10 +57,39 @@ namespace ClipStudio.ViewModels
         private string? _downloadedFilePath;
         private List<CropTrackBuilder.CropPoint>? _cropTrack;
         private List<TranscriptionService.CutSpan>? _fillerWords;
+        private bool _isRendering = false;
 
         public MainViewModel(IActivityLogger logger)
         {
             Logger = logger;
+            try
+            {
+                TempPaths.CleanupStale();
+            }
+            catch
+            {
+            }
+        }
+
+        private void DeleteDownloadedFile()
+        {
+            if (_downloadedFilePath != null)
+            {
+                try
+                {
+                    if (System.IO.File.Exists(_downloadedFilePath))
+                    {
+                        System.IO.File.Delete(_downloadedFilePath);
+                    }
+                }
+                catch
+                {
+                }
+                finally
+                {
+                    _downloadedFilePath = null;
+                }
+            }
         }
 
         private (int Width, int Height, double Fps) ReadVideoInfo(string path)
@@ -130,6 +159,14 @@ namespace ClipStudio.ViewModels
                 Logger.Log("Source and Output Folder must be specified.");
                 return;
             }
+
+            if (_isRendering)
+            {
+                Logger.Log("A render is in progress.");
+                return;
+            }
+
+            DeleteDownloadedFile();
 
             _cancellationTokenSource = new CancellationTokenSource();
             var token = _cancellationTokenSource.Token;
@@ -276,6 +313,8 @@ namespace ClipStudio.ViewModels
             {
                 StatusText = "Error occurred.";
                 Logger.Log($"Error: {ex.Message}");
+                DeleteDownloadedFile();
+                ProgressValue = 0;
             }
             finally
             {
@@ -292,11 +331,21 @@ namespace ClipStudio.ViewModels
         [RelayCommand]
         private void Cancel()
         {
+            if (IsReviewing)
+            {
+                ResetUI();
+                if (_cancellationTokenSource != null)
+                {
+                    _cancellationTokenSource.Dispose();
+                    _cancellationTokenSource = null;
+                }
+                Logger.Log("Review canceled.");
+                return;
+            }
+
             if (_cancellationTokenSource != null && !_cancellationTokenSource.IsCancellationRequested)
             {
                 _cancellationTokenSource.Cancel();
-                _cancellationTokenSource.Dispose();
-                _cancellationTokenSource = null;
                 StatusText = "Canceling...";
                 Logger.Log("Cancellation requested.");
             }
@@ -305,6 +354,7 @@ namespace ClipStudio.ViewModels
         [RelayCommand]
         private async Task ApproveAndRenderAsync()
         {
+            _isRendering = true;
             IsReviewing = false;
             StatusText = "Rendering clips...";
             Logger.Log("Rendering approved clips...");
@@ -350,10 +400,8 @@ namespace ClipStudio.ViewModels
             }
             finally
             {
-                if (_downloadedFilePath != null && System.IO.File.Exists(_downloadedFilePath))
-                {
-                    try { System.IO.File.Delete(_downloadedFilePath); _downloadedFilePath = null; } catch { }
-                }
+                DeleteDownloadedFile();
+                _isRendering = false;
             }
         }
 
@@ -363,11 +411,10 @@ namespace ClipStudio.ViewModels
             StatusText = "Ready";
             IsReviewing = false;
             ProposedClips.Clear();
+            _cropTrack = null;
+            _fillerWords = null;
 
-            if (_downloadedFilePath != null && System.IO.File.Exists(_downloadedFilePath))
-            {
-                try { System.IO.File.Delete(_downloadedFilePath); _downloadedFilePath = null; } catch { }
-            }
+            DeleteDownloadedFile();
         }
     }
 
