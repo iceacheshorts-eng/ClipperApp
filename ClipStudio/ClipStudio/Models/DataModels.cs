@@ -23,6 +23,13 @@ namespace ClipStudio.Models
         public double H { get; set; }
     }
 
+    public enum CropLayout
+    {
+        Single,
+        Stacked,
+        BlurFit
+    }
+
     public enum ContentStyle
     {
         Balanced,
