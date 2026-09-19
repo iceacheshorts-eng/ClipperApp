@@ -85,7 +85,7 @@ namespace ClipStudio.Services
             promptText.AppendLine($"You are an AI video editor. Find up to {count} best highlights from the transcript below.");
             promptText.AppendLine($"Choose self-contained moments that start and end on complete thoughts.");
             promptText.AppendLine($"The ideal length for each clip is between {minSeconds} and {maxSeconds} seconds, but focus on the complete thought.");
-            promptText.AppendLine("Format the output as a JSON array of objects, with each object having properties: StartSegment (int), EndSegment (int), Score (float 0.0-1.0), and Reason (short string).");
+            promptText.AppendLine("Return a JSON object with a \"highlights\" array. Each item has: startSegment (int), endSegment (int), score (number 0.0-1.0), reason (short string).");
             promptText.AppendLine("Use the numbers in square brackets exactly as shown. Do not renumber.");
             promptText.AppendLine("Here is the numbered transcript:\n");
 
