@@ -9,6 +9,7 @@ namespace ClipStudio.Models
         public double Duration => (EndTime - StartTime).TotalSeconds;
         public double Score { get; set; }
         public string Transcript { get; set; } = string.Empty;
+        public string Reason { get; set; } = string.Empty;
         public bool IsApproved { get; set; } = true;
     }
 

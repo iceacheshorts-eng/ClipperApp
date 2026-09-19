@@ -3,7 +3,6 @@ using System.Diagnostics;
 using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Management;
 
 namespace ClipStudio.Services
 {
@@ -27,12 +26,30 @@ namespace ClipStudio.Services
                 CreateNoWindow = true
             };
 
+            return await RunProcessCoreAsync(startInfo, onOutputLine, cancellationToken);
+        }
+
+        public static async Task<int> RunProcessAsync(
+            ProcessStartInfo startInfo,
+            Action<string> onOutputLine,
+            CancellationToken cancellationToken)
+        {
+            return await RunProcessCoreAsync(startInfo, onOutputLine, cancellationToken);
+        }
+
+        private static async Task<int> RunProcessCoreAsync(
+            ProcessStartInfo startInfo,
+            Action<string> onOutputLine,
+            CancellationToken cancellationToken)
+        {
+            startInfo.RedirectStandardOutput = true;
+            startInfo.RedirectStandardError = true;
+            startInfo.UseShellExecute = false;
+            startInfo.CreateNoWindow = true;
+
             using var process = new Process { StartInfo = startInfo };
 
-            var tcs = new TaskCompletionSource<int>();
-
             process.EnableRaisingEvents = true;
-            process.Exited += (sender, args) => tcs.TrySetResult(process.ExitCode);
 
             process.OutputDataReceived += (sender, args) =>
             {
@@ -51,49 +68,33 @@ namespace ClipStudio.Services
 
             if (!process.Start())
             {
-                throw new InvalidOperationException($"Failed to start process: {fileName}");
+                throw new InvalidOperationException($"Failed to start process: {startInfo.FileName}");
             }
 
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
-            await using var registration = cancellationToken.Register(() =>
+            try
+            {
+                await process.WaitForExitAsync(cancellationToken);
+            }
+            catch (OperationCanceledException)
             {
                 try
                 {
                     if (!process.HasExited)
                     {
-                        KillProcessTree(process.Id);
+                        process.Kill(entireProcessTree: true);
                     }
-                    tcs.TrySetCanceled();
                 }
                 catch
                 {
                     // Ignore exceptions during kill
                 }
-            });
-
-            return await tcs.Task;
-        }
-
-        public static void KillProcessTree(int processId)
-        {
-            try
-            {
-                using var searcher = new ManagementObjectSearcher(
-                    $"Select * From Win32_Process Where ParentProcessID={processId}");
-                var moc = searcher.Get();
-                foreach (var mo in moc)
-                {
-                    KillProcessTree(Convert.ToInt32(mo["ProcessID"]));
-                }
-                var proc = Process.GetProcessById(processId);
-                proc.Kill();
+                throw;
             }
-            catch
-            {
-                // Process might have already exited.
-            }
+
+            return process.ExitCode;
         }
     }
 }

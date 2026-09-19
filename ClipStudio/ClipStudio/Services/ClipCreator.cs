@@ -25,7 +25,7 @@ namespace ClipStudio.Services
             string outputFilePath,
             ClipCandidate clip,
             List<CropTrackBuilder.CropPoint> cropTrack,
-            List<FillerWordDetectorService.CutSpan>? fillerWords,
+            List<TranscriptionService.CutSpan>? fillerWords,
             CancellationToken cancellationToken)
         {
             if (!File.Exists(_ffmpegPath))
@@ -110,10 +110,13 @@ namespace ClipStudio.Services
                     var errorLogTask = process.StandardError.ReadToEndAsync();
 
                     // Pre-filter the crop track for this clip to optimize lookup
-                    var clipTrack = cropTrack.Where(p => p.T >= clip.StartTime.TotalSeconds && p.T <= clip.EndTime.TotalSeconds).ToList();
+                    var clipTrack = cropTrack.Where(p => p.T >= clip.StartTime.TotalSeconds && p.T <= clip.EndTime.TotalSeconds).OrderBy(p => p.T).ToList();
 
                     using var frame = new OpenCvSharp.Mat();
                     int frameIndex = 0;
+                    int trackIndex = 0;
+                    
+                    byte[]? frameBytes = null;
 
                     while (capture.Read(frame) && !frame.Empty())
                     {
@@ -122,8 +125,13 @@ namespace ClipStudio.Services
                         double currentVideoTime = frameIndex / fps;
                         double absoluteTime = clip.StartTime.TotalSeconds + currentVideoTime;
 
-                        // Find the closest crop point
-                        var cropPoint = clipTrack.OrderBy(p => Math.Abs(p.T - absoluteTime)).FirstOrDefault();
+                        // Advance track index directly instead of OrderBy
+                        while (trackIndex < clipTrack.Count - 1 && clipTrack[trackIndex + 1].T <= absoluteTime)
+                        {
+                            trackIndex++;
+                        }
+
+                        var cropPoint = clipTrack.Count > 0 ? clipTrack[trackIndex] : null;
 
                         double cx = cropPoint?.Cx ?? 0.5;
                         double cy = cropPoint?.Cy ?? 0.5;
@@ -139,8 +147,11 @@ namespace ClipStudio.Services
                         using var subMat = new OpenCvSharp.Mat(frame, cropRect);
                         using var croppedFrame = subMat.Clone(); // Clone to guarantee contiguous memory stride
 
-                        // Write raw bytes to ffmpeg stdin
-                        byte[] frameBytes = new byte[croppedFrame.Total() * croppedFrame.ElemSize()];
+                        int byteSize = (int)(croppedFrame.Total() * croppedFrame.ElemSize());
+                        if (frameBytes == null || frameBytes.Length != byteSize)
+                        {
+                            frameBytes = new byte[byteSize];
+                        }
                         System.Runtime.InteropServices.Marshal.Copy(croppedFrame.Data, frameBytes, 0, frameBytes.Length);
 
                         try
@@ -179,7 +190,7 @@ namespace ClipStudio.Services
             }
         }
 
-        private string BuildSelectExpression(ClipCandidate clip, List<FillerWordDetectorService.CutSpan> fillers)
+        private string BuildSelectExpression(ClipCandidate clip, List<TranscriptionService.CutSpan> fillers)
         {
             var keepSpans = new List<(double Start, double End)>();
             double current = clip.StartTime.TotalSeconds;

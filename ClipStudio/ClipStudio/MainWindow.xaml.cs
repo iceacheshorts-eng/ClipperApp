@@ -1,4 +1,4 @@
-﻿using System.Text;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Data;
@@ -22,7 +22,23 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-            var logger = new ActivityLogger();
-            DataContext = new MainViewModel(logger);
+        var logger = new ActivityLogger();
+        DataContext = new MainViewModel(logger);
+        
+        var notifyCollection = ActivityLogList.Items as System.Collections.Specialized.INotifyCollectionChanged;
+        if (notifyCollection != null)
+        {
+            notifyCollection.CollectionChanged += (s, e) =>
+            {
+                if (e.Action == System.Collections.Specialized.NotifyCollectionChangedAction.Add && e.NewItems != null && e.NewItems.Count > 0)
+                {
+                    var item = e.NewItems[0];
+                    if (item != null)
+                    {
+                        ActivityLogList.ScrollIntoView(item);
+                    }
+                }
+            };
+        }
     }
 }

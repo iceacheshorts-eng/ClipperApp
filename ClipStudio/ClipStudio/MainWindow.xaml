@@ -107,7 +107,7 @@
         <TextBlock Text="Activity Log:" Grid.Row="4" Margin="0,0,0,4" FontWeight="Bold"/>
 
         <!-- Activity Log -->
-        <ListBox ItemsSource="{Binding Logger.Logs}" Grid.Row="5"
+        <ListBox x:Name="ActivityLogList" ItemsSource="{Binding Logger.Logs}" Grid.Row="5"
                  Background="{DynamicResource MaterialDesignTextFieldBoxBackground}"
                  ScrollViewer.VerticalScrollBarVisibility="Auto">
             <ListBox.ItemTemplate>

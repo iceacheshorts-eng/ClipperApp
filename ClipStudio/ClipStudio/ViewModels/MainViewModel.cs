@@ -56,7 +56,7 @@ namespace ClipStudio.ViewModels
         private CancellationTokenSource? _cancellationTokenSource;
         private string? _downloadedFilePath;
         private List<CropTrackBuilder.CropPoint>? _cropTrack;
-        private List<FillerWordDetectorService.CutSpan>? _fillerWords;
+        private List<TranscriptionService.CutSpan>? _fillerWords;
 
         public MainViewModel(IActivityLogger logger)
         {
@@ -143,11 +143,6 @@ namespace ClipStudio.ViewModels
 
                 var aiService = new AIClipFinderService(Logger);
                 List<ClipCandidate>? aiCandidates = null;
-                try
-                {
-                    aiCandidates = await aiService.FindClipsAsync(tempWavPath, token);
-                }
-                catch (System.IO.FileNotFoundException) { /* Handled, ignored */ }
 
                 var loudnessScores = await loudnessTask;
                 ProgressValue = 50;
@@ -181,7 +176,7 @@ namespace ClipStudio.ViewModels
                 if (RemoveFillerWordsEnabled)
                 {
                     StatusText = "Detecting Filler Words...";
-                    var fillerService = new FillerWordDetectorService(Logger);
+                    var fillerService = new TranscriptionService(Logger);
                     try
                     {
                         _fillerWords = await fillerService.DetectFillerWordsAsync(tempWavPath, token);
