@@ -14,16 +14,27 @@ namespace ClipStudio.Services
             public double Cy { get; set; }
         }
 
-        public List<CropPoint> BuildTrack(List<FaceDetection> detections, double videoDuration, double fps)
+        public List<CropPoint> BuildTrack(List<FaceDetection> detections, double videoDuration, double fps, int sourceWidth, int sourceHeight)
         {
             var track = new List<CropPoint>();
-            if (detections == null || detections.Count == 0)
+            if (sourceWidth <= 0 || sourceHeight <= 0 || detections == null || detections.Count == 0)
             {
                 // Return default center track
                 track.Add(new CropPoint { T = 0, Cx = 0.5, Cy = 0.5 });
                 track.Add(new CropPoint { T = videoDuration, Cx = 0.5, Cy = 0.5 });
                 return track;
             }
+
+            double cropW = (double)CropMath.TargetWidth(sourceHeight) / sourceWidth;
+            if (cropW >= 1.0)
+            {
+                track.Add(new CropPoint { T = 0, Cx = 0.5, Cy = 0.5 });
+                track.Add(new CropPoint { T = videoDuration, Cx = 0.5, Cy = 0.5 });
+                return track;
+            }
+
+            double minCx = cropW / 2.0;
+            double maxCx = 1.0 - (cropW / 2.0);
 
             // Upgraded cinematic tracking parameters
             double deadzone = 0.05; // Slightly larger deadzone to avoid micro-jitters
@@ -91,10 +102,6 @@ namespace ClipStudio.Services
                 }
 
                 // Clamp to safe boundaries so 9:16 crop doesn't go out of bounds
-                double cropW = 9.0 / 16.0;
-                double minCx = cropW / 2.0;
-                double maxCx = 1.0 - (cropW / 2.0);
-
                 currentCx = Math.Clamp(currentCx, minCx, maxCx);
 
                 // Keep Y locked to center for modern vertical video style unless dramatic change
