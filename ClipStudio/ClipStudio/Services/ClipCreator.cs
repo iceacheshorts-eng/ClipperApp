@@ -287,7 +287,7 @@ namespace ClipStudio.Services
         private static void ComposeSingle(OpenCvSharp.Mat frame, OpenCvSharp.Mat outFrame, CropTrackBuilder.CropPoint? cropPoint, int width, int height, int targetWidth, int targetHeight)
         {
             double cx = cropPoint?.Cx ?? 0.5;
-            int x = (int)Math.Round(cx * width - targetWidth / 2.0);
+            int x = (int)(cx * width - targetWidth / 2.0);
             x = Math.Clamp(x, 0, width - targetWidth);
             var rect = new OpenCvSharp.Rect(x, 0, targetWidth, targetHeight);
             using var crop = new OpenCvSharp.Mat(frame, rect);

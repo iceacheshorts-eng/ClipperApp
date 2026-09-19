@@ -414,7 +414,17 @@ namespace ClipStudio.Services
                         cam += step;
                     }
 
-                    double step2 = (target2 - cam2) * (1 - Math.Exp(-dt / CameraTau));
+                    double err2 = target2 - cam2;
+                    double desired2;
+                    if (Math.Abs(err2) <= ComfortHalfWidth)
+                    {
+                        desired2 = cam2;
+                    }
+                    else
+                    {
+                        desired2 = cam2 + Math.Sign(err2) * (Math.Abs(err2) - ComfortHalfWidth);
+                    }
+                    double step2 = (desired2 - cam2) * (1 - Math.Exp(-dt / CameraTau));
                     double maxStep2 = MaxPanSpeed * dt;
                     step2 = Math.Clamp(step2, -maxStep2, maxStep2);
                     cam2 += step2;
