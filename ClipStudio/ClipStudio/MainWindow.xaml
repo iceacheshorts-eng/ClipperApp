@@ -63,6 +63,7 @@
             <CheckBox Content="Review clips before rendering" IsChecked="{Binding ReviewClipsEnabled}" Margin="0,0,16,0" VerticalAlignment="Center"/>
             <CheckBox Content="Remove filler words" IsChecked="{Binding RemoveFillerWordsEnabled}" Margin="0,0,16,0" VerticalAlignment="Center"/>
             <CheckBox Content="Burn-in captions" IsChecked="{Binding CaptionsEnabled}" Margin="0,0,16,0" VerticalAlignment="Center"/>
+            <CheckBox Content="Use GPU for Transcription" IsChecked="{Binding UseGpuForTranscription}" Margin="0,0,16,0" VerticalAlignment="Center"/>
             <ComboBox materialDesign:HintAssist.Hint="Caption style" ItemsSource="{Binding CaptionStyleOptions}" SelectedItem="{Binding SelectedCaptionStyle}" DisplayMemberPath="Name" IsEnabled="{Binding CaptionsEnabled}" Width="150" Margin="0,0,16,0"/>
             <!-- Trimming dead air removed based on user input -->
         </WrapPanel>

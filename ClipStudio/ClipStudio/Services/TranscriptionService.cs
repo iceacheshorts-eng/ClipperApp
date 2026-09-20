@@ -60,7 +60,7 @@ namespace ClipStudio.Services
             return false;
         }
 
-        public async Task<TranscriptionResult> TranscribeAsync(string wavPath, bool useFillerPrompt, CancellationToken ct)
+        public async Task<TranscriptionResult> TranscribeAsync(string wavPath, bool useFillerPrompt, bool useGpu, CancellationToken ct)
         {
             if (!File.Exists(_modelPath))
             {
@@ -69,6 +69,24 @@ namespace ClipStudio.Services
             }
 
             _logger.Log("Transcribing audio...");
+
+            if (useGpu)
+            {
+                Whisper.net.LibraryLoader.RuntimeOptions.RuntimeLibraryOrder = new List<Whisper.net.LibraryLoader.RuntimeLibrary>
+                {
+                    Whisper.net.LibraryLoader.RuntimeLibrary.Cuda12,
+                    Whisper.net.LibraryLoader.RuntimeLibrary.Vulkan,
+                    Whisper.net.LibraryLoader.RuntimeLibrary.Cpu
+                };
+            }
+            else
+            {
+                Whisper.net.LibraryLoader.RuntimeOptions.RuntimeLibraryOrder = new List<Whisper.net.LibraryLoader.RuntimeLibrary>
+                {
+                    Whisper.net.LibraryLoader.RuntimeLibrary.Cpu
+                };
+            }
+
             var result = new TranscriptionResult();
 
             await Task.Run(async () =>
@@ -87,6 +105,9 @@ namespace ClipStudio.Services
 
                 using var processor = builder.Build();
                 using var fileStream = File.OpenRead(wavPath);
+
+                var loadedLibrary = Whisper.net.LibraryLoader.RuntimeOptions.LoadedLibrary;
+                _logger.Log($"Transcription runtime loaded: {loadedLibrary}");
 
                 var rawWords = new List<WordTiming>();
                 bool loggedEstimationWarning = false;

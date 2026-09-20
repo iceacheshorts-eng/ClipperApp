@@ -59,6 +59,9 @@ namespace ClipStudio.ViewModels
         [ObservableProperty]
         private bool _captionsEnabled = true;
 
+        [ObservableProperty]
+        private bool _useGpuForTranscription = true;
+
         public ObservableCollection<CaptionStyle> CaptionStyleOptions { get; } = new(CaptionStyles.All);
 
         [ObservableProperty]
@@ -306,7 +309,7 @@ namespace ClipStudio.ViewModels
                 {
                     try
                     {
-                        transcription = await transcriptionService.TranscribeAsync(tempWavPath, RemoveFillerWordsEnabled, token);
+                        transcription = await transcriptionService.TranscribeAsync(tempWavPath, RemoveFillerWordsEnabled, UseGpuForTranscription, token);
                         _words = transcription.Words;
                     }
                     catch (OperationCanceledException)
