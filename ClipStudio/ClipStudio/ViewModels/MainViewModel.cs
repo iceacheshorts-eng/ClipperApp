@@ -52,6 +52,14 @@ namespace ClipStudio.ViewModels
         private bool _removeFillerWordsEnabled = false;
 
         [ObservableProperty]
+        private bool _captionsEnabled = true;
+
+        public ObservableCollection<CaptionStyle> CaptionStyleOptions { get; } = new(CaptionStyles.All);
+
+        [ObservableProperty]
+        private CaptionStyle _selectedCaptionStyle = CaptionStyles.Default;
+
+        [ObservableProperty]
         private int _progressValue = 0;
 
         [ObservableProperty]
@@ -65,6 +73,7 @@ namespace ClipStudio.ViewModels
         private CancellationTokenSource? _cancellationTokenSource;
         private string? _downloadedFilePath;
         private List<TranscriptionService.CutSpan>? _fillerWords;
+        private List<WordTiming>? _words;
         private bool _isRendering = false;
 
         private const string DefaultOutputFolderName = "ClipStudio";
@@ -250,6 +259,7 @@ namespace ClipStudio.ViewModels
             ProposedClips.Clear();
             _downloadedFilePath = null;
             _fillerWords = null;
+            _words = null;
             string? tempWavPath = null;
 
             Logger.Log("Processing started...");
@@ -287,11 +297,12 @@ namespace ClipStudio.ViewModels
 
                 bool haveKey = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(GroqConfig.EnvVarName));
 
-                if (haveKey || RemoveFillerWordsEnabled)
+                if (haveKey || RemoveFillerWordsEnabled || CaptionsEnabled)
                 {
                     try
                     {
                         transcription = await transcriptionService.TranscribeAsync(tempWavPath, RemoveFillerWordsEnabled, token);
+                        _words = transcription.Words;
                     }
                     catch (OperationCanceledException)
                     {
@@ -402,6 +413,11 @@ namespace ClipStudio.ViewModels
                     }
                 }
 
+                if (CaptionsEnabled && transcription == null)
+                {
+                    Logger.Log("Captions skipped: no transcript available.");
+                }
+
                 ProgressValue = 90;
 
                 foreach (var candidate in candidates)
@@ -481,6 +497,9 @@ namespace ClipStudio.ViewModels
 
             string sourceVideo = _downloadedFilePath ?? SourcePath;
 
+            var wordsForRender = CaptionsEnabled ? _words : null;
+            var styleForRender = SelectedCaptionStyle;
+
             try
             {
                 var clipsToRender = ProposedClips.Where(c => c.IsApproved).ToList();
@@ -523,7 +542,7 @@ namespace ClipStudio.ViewModels
 
                     StatusText = $"Rendering clip {current + 1}/{total}...";
 
-                    await creator.RenderClipAsync(sourceVideo, outPath, clip, clipTrack, _fillerWords, token);
+                    await creator.RenderClipAsync(sourceVideo, outPath, clip, clipTrack, _fillerWords, token, wordsForRender, styleForRender);
 
                     current++;
                     ProgressValue = 90 + (int)((current / (double)total) * 10);
