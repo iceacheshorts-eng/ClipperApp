@@ -7,6 +7,7 @@ ClipCreator processes videos from a local file or via a YouTubeDownloader into 9
 - Windows
 - .NET 8 SDK
 - Build with `dotnet build ClipStudio/ClipStudio/ClipStudio.csproj`
+- NVIDIA GPU acceleration requires the CUDA 12 runtime to be installed on the host machine.
 
 ## Setup
 - `yt-dlp.exe` and `ffmpeg.exe` must go in the `Binaries` folder, which is copied to the output folder by the csproj.
