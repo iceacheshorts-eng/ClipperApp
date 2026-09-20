@@ -38,7 +38,6 @@ namespace ClipStudio
                 vm.CloseRequested += (result) =>
                 {
                     DialogResult = result;
-                    Close();
                 };
 
                 await vm.LoadAsync();

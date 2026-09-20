@@ -88,7 +88,7 @@
                 <TextBlock Text="{Binding CutCount}" />
             </StackPanel>
 
-            <TextBlock Text="{Binding WarningText}" Foreground="Orange" Visibility="{Binding WarningText, Converter={StaticResource BoolToVis}}" />
+            <TextBlock Text="{Binding WarningText}" Foreground="Orange" Visibility="{Binding HasWarning, Converter={StaticResource BoolToVis}}" />
         </StackPanel>
 
         <!-- Mode selector -->

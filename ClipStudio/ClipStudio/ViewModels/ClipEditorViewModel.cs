@@ -70,19 +70,19 @@ namespace ClipStudio.ViewModels
 
         partial void OnModeChanged(EditorMode value)
         {
+            if (_rangeAnchor != null)
+            {
+                _rangeAnchor.IsAnchor = false;
+                _rangeAnchor = null;
+            }
+
             if (value != EditorMode.DeleteRange)
             {
-                _rangeAnchor = null;
                 StatusText = "Ready.";
             }
             else
             {
                 StatusText = "Click the first word of the range.";
-                if (_rangeAnchor != null)
-                {
-                    _rangeAnchor.IsAnchor = false;
-                    _rangeAnchor = null;
-                }
             }
         }
 
@@ -93,7 +93,10 @@ namespace ClipStudio.ViewModels
         private string _statusText = "Initializing...";
 
         [ObservableProperty]
+        [NotifyPropertyChangedFor(nameof(HasWarning))]
         private string _warningText = string.Empty;
+
+        public bool HasWarning => !string.IsNullOrWhiteSpace(WarningText);
 
         [ObservableProperty]
         private double _originalDuration;
@@ -334,12 +337,6 @@ namespace ClipStudio.ViewModels
 
         private bool ValidateDuration()
         {
-            var ranges = Words.Where(w => w.IsDeleted && !w.IsOutside)
-                              .Select(w => new TimeRange(w.Start, w.End))
-                              .ToList();
-            var normalized = ClipEditMath.NormalizeRanges(ranges, _workingStart, _workingEnd);
-            var kept = ClipEditMath.KeptDuration(_workingStart, _workingEnd, normalized).TotalSeconds;
-
             var total = (_workingEnd - _workingStart).TotalSeconds;
 
             return total >= ClipEditMath.MinClipSeconds && total <= ClipEditMath.MaxClipSeconds;
