@@ -80,8 +80,6 @@ namespace ClipStudio.ViewModels
 
         private CancellationTokenSource? _cancellationTokenSource;
         private string? _downloadedFilePath;
-        private List<TranscriptionService.CutSpan>? _fillerWords;
-        private List<WordTiming>? _words;
         private bool _isRendering = false;
 
         private const string DefaultOutputFolderName = "ClipStudio";
@@ -266,8 +264,6 @@ namespace ClipStudio.ViewModels
             IsReviewing = false;
             ProposedClips.Clear();
             _downloadedFilePath = null;
-            _fillerWords = null;
-            _words = null;
             string? tempWavPath = null;
 
             Logger.Log("Processing started...");
@@ -309,8 +305,7 @@ namespace ClipStudio.ViewModels
                 {
                     try
                     {
-                        transcription = await transcriptionService.TranscribeAsync(tempWavPath, RemoveFillerWordsEnabled, UseGpuForTranscription, token);
-                        _words = transcription.Words;
+                        transcription = await transcriptionService.TranscribeAsync(tempWavPath, RemoveFillerWordsEnabled, UseGpuForTranscription, false, token);
                     }
                     catch (OperationCanceledException)
                     {
@@ -407,25 +402,6 @@ namespace ClipStudio.ViewModels
 
                 ProgressValue = 75;
 
-                // 6. Filler words
-                if (RemoveFillerWordsEnabled)
-                {
-                    if (transcription != null)
-                    {
-                        StatusText = "Detecting Filler Words...";
-                        _fillerWords = transcriptionService.DetectFillerSpans(transcription.Words);
-                    }
-                    else
-                    {
-                        Logger.Log("Filler word removal skipped: no transcript available.");
-                    }
-                }
-
-                if (CaptionsEnabled && transcription == null)
-                {
-                    Logger.Log("Captions skipped: no transcript available.");
-                }
-
                 ProgressValue = 90;
 
                 foreach (var candidate in candidates)
@@ -505,7 +481,6 @@ namespace ClipStudio.ViewModels
 
             string sourceVideo = _downloadedFilePath ?? SourcePath;
 
-            var wordsForRender = CaptionsEnabled ? _words : null;
             var styleForRender = SelectedCaptionStyle;
 
             try
@@ -517,6 +492,8 @@ namespace ClipStudio.ViewModels
                 var info = ReadVideoInfo(sourceVideo);
                 var faceTracker = new FaceTrackerService(Logger);
                 var trackBuilder = new CropTrackBuilder();
+                var videoAnalyzer = new VideoAnalyzer(Logger);
+                var transcriptionService = new TranscriptionService(Logger);
 
                 foreach (var clipVM in clipsToRender)
                 {
@@ -548,19 +525,63 @@ namespace ClipStudio.ViewModels
 
                     var clipTrack = trackBuilder.BuildClipTrack(detections, winStart, winEnd, info.Fps, info.Width, info.Height);
 
-                    StatusText = $"Rendering clip {current + 1}/{total}...";
+                    List<TranscriptionService.CutSpan>? localFillerWords = null;
+                    List<WordTiming>? wordsForRender = null;
+                    string? tempClipWavPath = null;
 
-                    await creator.RenderClipAsync(
-                        sourceVideo,
-                        outPath,
-                        clip,
-                        clipTrack,
-                        _fillerWords,
-                        token,
-                        wordsForRender,
-                        styleForRender,
-                        SelectedEncoder,
-                        msg => StatusText = msg);
+                    try
+                    {
+                        if (CaptionsEnabled || RemoveFillerWordsEnabled)
+                        {
+                            StatusText = $"Extracting audio for clip {current + 1}/{total}...";
+                            tempClipWavPath = await videoAnalyzer.ExtractAudioAsync(sourceVideo, token, clip.StartTime, clip.EndTime);
+
+                            StatusText = $"Transcribing clip {current + 1}/{total}...";
+                            var clipTranscription = await transcriptionService.TranscribeAsync(tempClipWavPath, RemoveFillerWordsEnabled, UseGpuForTranscription, true, token);
+
+                            var shiftedWords = new List<WordTiming>(clipTranscription.Words.Count);
+                            foreach (var word in clipTranscription.Words)
+                            {
+                                shiftedWords.Add(word with
+                                {
+                                    Start = word.Start.Add(clip.StartTime),
+                                    End = word.End.Add(clip.StartTime)
+                                });
+                            }
+
+                            if (CaptionsEnabled)
+                            {
+                                wordsForRender = shiftedWords;
+                            }
+
+                            if (RemoveFillerWordsEnabled)
+                            {
+                                StatusText = $"Detecting Filler Words for clip {current + 1}/{total}...";
+                                localFillerWords = transcriptionService.DetectFillerSpans(shiftedWords);
+                            }
+                        }
+
+                        StatusText = $"Rendering clip {current + 1}/{total}...";
+
+                        await creator.RenderClipAsync(
+                            sourceVideo,
+                            outPath,
+                            clip,
+                            clipTrack,
+                            localFillerWords,
+                            token,
+                            wordsForRender,
+                            styleForRender,
+                            SelectedEncoder,
+                            msg => StatusText = msg);
+                    }
+                    finally
+                    {
+                        if (tempClipWavPath != null && System.IO.File.Exists(tempClipWavPath))
+                        {
+                            try { System.IO.File.Delete(tempClipWavPath); } catch { }
+                        }
+                    }
 
                     current++;
                     ProgressValue = 90 + (int)((current / (double)total) * 10);
@@ -593,7 +614,6 @@ namespace ClipStudio.ViewModels
             StatusText = "Ready";
             IsReviewing = false;
             ProposedClips.Clear();
-            _fillerWords = null;
 
             DeleteDownloadedFile();
         }

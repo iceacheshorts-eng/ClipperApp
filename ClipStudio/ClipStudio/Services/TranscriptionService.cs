@@ -60,7 +60,7 @@ namespace ClipStudio.Services
             return false;
         }
 
-        public async Task<TranscriptionResult> TranscribeAsync(string wavPath, bool useFillerPrompt, bool useGpu, CancellationToken ct)
+        public async Task<TranscriptionResult> TranscribeAsync(string wavPath, bool useFillerPrompt, bool useGpu, bool wordLevelTimestamps, CancellationToken ct)
         {
             if (!File.Exists(_modelPath))
             {
@@ -94,9 +94,14 @@ namespace ClipStudio.Services
                 using var whisperFactory = WhisperFactory.FromPath(_modelPath);
                 var builder = whisperFactory.CreateBuilder()
                     .WithLanguage("en")
-                    .WithTokenTimestamps()
-                    .WithMaxSegmentLength(1)
-                    .SplitOnWord();
+                    .WithNoContext();
+
+                if (wordLevelTimestamps)
+                {
+                    builder.WithTokenTimestamps()
+                           .WithMaxSegmentLength(1)
+                           .SplitOnWord();
+                }
 
                 if (useFillerPrompt)
                 {
