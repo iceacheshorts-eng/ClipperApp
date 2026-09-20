@@ -125,14 +125,13 @@ namespace ClipStudio.Services
                 }
             }
 
-            promptText.AppendLine("\nYou must respond ONLY with valid JSON. Your entire output must strictly match the requested JSON schema. Do not include markdown formatting, backticks, or conversational text.");
-
             var payload = new
             {
                 model = GroqConfig.ModelId,
                 max_tokens = 2048,
                 messages = new[]
                 {
+                    new { role = "system", content = "You must respond ONLY with valid JSON. Your entire output must strictly match the requested JSON schema. Do not include markdown formatting, backticks, or conversational text." },
                     new { role = "user", content = promptText.ToString() }
                 },
                 response_format = new
