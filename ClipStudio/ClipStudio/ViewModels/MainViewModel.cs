@@ -28,6 +28,11 @@ namespace ClipStudio.ViewModels
         [ObservableProperty]
         private string _selectedQuality = "1080p";
 
+        public ObservableCollection<string> Encoders { get; } = new(new[] { "Auto", "CPU", "NVENC", "QSV", "AMF" });
+
+        [ObservableProperty]
+        private string _selectedEncoder = "Auto";
+
         public ObservableCollection<ContentStyle> ContentStyles { get; } = new(Enum.GetValues<ContentStyle>());
 
         [ObservableProperty]
@@ -542,7 +547,17 @@ namespace ClipStudio.ViewModels
 
                     StatusText = $"Rendering clip {current + 1}/{total}...";
 
-                    await creator.RenderClipAsync(sourceVideo, outPath, clip, clipTrack, _fillerWords, token, wordsForRender, styleForRender);
+                    await creator.RenderClipAsync(
+                        sourceVideo,
+                        outPath,
+                        clip,
+                        clipTrack,
+                        _fillerWords,
+                        token,
+                        wordsForRender,
+                        styleForRender,
+                        SelectedEncoder,
+                        msg => StatusText = msg);
 
                     current++;
                     ProgressValue = 90 + (int)((current / (double)total) * 10);

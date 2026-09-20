@@ -52,6 +52,7 @@
         <!-- Settings -->
         <WrapPanel Grid.Row="1" Margin="0,0,0,16">
             <ComboBox materialDesign:HintAssist.Hint="Quality" ItemsSource="{Binding Qualities}" SelectedItem="{Binding SelectedQuality}" Width="120" Margin="0,0,16,0"/>
+            <ComboBox materialDesign:HintAssist.Hint="Encoder" ItemsSource="{Binding Encoders}" SelectedItem="{Binding SelectedEncoder}" Width="120" Margin="0,0,16,0"/>
             <ComboBox materialDesign:HintAssist.Hint="Content Style" ItemsSource="{Binding ContentStyles}" SelectedItem="{Binding SelectedContentStyle}" Width="150" Margin="0,0,16,0"/>
 
             <TextBox materialDesign:HintAssist.Hint="Clip Count" Text="{Binding ClipCount, UpdateSourceTrigger=PropertyChanged}" Width="100" Margin="0,0,16,0"/>
