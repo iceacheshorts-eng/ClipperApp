@@ -41,4 +41,16 @@ public partial class MainWindow : Window
             };
         }
     }
+    
+    private void CopyLog_Click(object sender, RoutedEventArgs e)
+        {
+            if (DataContext is MainViewModel vm && vm.Logger != null && vm.Logger.Logs != null)
+            {
+                var logText = string.Join(System.Environment.NewLine, vm.Logger.Logs);
+                if (!string.IsNullOrEmpty(logText))
+                {
+                    Clipboard.SetText(logText);
+                }
+            }
+        }
 }
