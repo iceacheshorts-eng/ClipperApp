@@ -556,6 +556,16 @@ namespace ClipStudio.ViewModels
                     token.ThrowIfCancellationRequested();
 
                     var clip = clipVM.GetClip();
+
+                    var manual = ClipEditMath.NormalizeRanges(clip.DeletedRanges, clip.StartTime, clip.EndTime);
+                    if (ClipEditMath.KeptDuration(clip.StartTime, clip.EndTime, manual).TotalSeconds < ClipEditMath.MinClipSeconds)
+                    {
+                        Logger.Log($"Skipping clip [{clip.StartTime:hh\\:mm\\:ss} - {clip.EndTime:hh\\:mm\\:ss}]: nothing left after cuts");
+                        current++;
+                        ProgressValue = 90 + (int)((current / (double)total) * 10);
+                        continue;
+                    }
+
                     string outName = $"Clip_{current + 1}_{Guid.NewGuid().ToString().Substring(0,4)}.mp4";
                     string outPath = System.IO.Path.Combine(OutputFolder, outName);
 
@@ -617,6 +627,26 @@ namespace ClipStudio.ViewModels
                             }
                         }
 
+                        IEnumerable<TimeRange>? fillerRanges = localFillerWords?.Select(s => new TimeRange(s.Start, s.End));
+                        var merged = ClipEditMath.MergeRanges(fillerRanges ?? Enumerable.Empty<TimeRange>(), manual, clip.StartTime, clip.EndTime);
+
+                        if (ClipEditMath.KeptDuration(clip.StartTime, clip.EndTime, merged).TotalSeconds < ClipEditMath.MinClipSeconds)
+                        {
+                            Logger.Log($"Skipping clip [{clip.StartTime:hh\\:mm\\:ss} - {clip.EndTime:hh\\:mm\\:ss}]: nothing left after cuts");
+                            current++;
+                            ProgressValue = 90 + (int)((current / (double)total) * 10);
+                            continue;
+                        }
+
+                        if (manual.Count > 0)
+                        {
+                            Logger.Log($"Applying {manual.Count} manual cut(s) to clip {current + 1}/{total}");
+                        }
+
+                        List<TranscriptionService.CutSpan>? mergedSpans = merged.Count > 0
+                            ? merged.Select(r => new TranscriptionService.CutSpan { Start = r.Start, End = r.End }).ToList()
+                            : null;
+
                         StatusText = $"Rendering clip {current + 1}/{total}...";
 
                         await creator.RenderClipAsync(
@@ -624,7 +654,7 @@ namespace ClipStudio.ViewModels
                             outPath,
                             clip,
                             clipTrack,
-                            localFillerWords,
+                            mergedSpans,
                             token,
                             wordsForRender,
                             styleForRender,
@@ -691,6 +721,16 @@ namespace ClipStudio.ViewModels
         partial void OnIsApprovedChanged(bool value)
         {
             _clip.IsApproved = value;
+        }
+
+        public void RefreshFromClip()
+        {
+            OnPropertyChanged(nameof(DisplayText));
+            OnPropertyChanged(nameof(Reason));
+            OnPropertyChanged(nameof(FullTranscript));
+            OnPropertyChanged(nameof(Preview));
+            OnPropertyChanged(nameof(HasReason));
+            OnPropertyChanged(nameof(HasPreview));
         }
 
         public string DisplayText => $"[{_clip.StartTime:hh\\:mm\\:ss} - {_clip.EndTime:hh\\:mm\\:ss}] ({_clip.Duration:F1}s) Score: {_clip.Score:F2}";
