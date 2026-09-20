@@ -93,7 +93,11 @@
                     <ListBox.ItemTemplate>
                         <DataTemplate>
                             <CheckBox IsChecked="{Binding IsApproved}">
-                                <TextBlock Text="{Binding DisplayText}" />
+                                <StackPanel ToolTip="{Binding FullTranscript}">
+                                    <TextBlock Text="{Binding DisplayText}" />
+                                    <TextBlock Text="{Binding Reason}" FontStyle="Italic" TextWrapping="Wrap" Visibility="{Binding HasReason, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                                    <TextBlock Text="{Binding Preview}" Opacity="0.7" TextWrapping="Wrap" Visibility="{Binding HasPreview, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                                </StackPanel>
                             </CheckBox>
                         </DataTemplate>
                     </ListBox.ItemTemplate>

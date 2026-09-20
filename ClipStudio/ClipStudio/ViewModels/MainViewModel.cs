@@ -169,16 +169,19 @@ namespace ClipStudio.ViewModels
         [RelayCommand]
         private void BrowseOutput()
         {
-            // Quick workaround for folder picker since native FolderBrowserDialog is winforms
-            var dialog = new Microsoft.Win32.SaveFileDialog
+            var dialog = new Microsoft.Win32.OpenFolderDialog
             {
-                Title = "Select Output Folder",
-                FileName = "SelectFolder",
-                Filter = "Directory|*.this.directory"
+                Title = "Select Output Folder"
             };
+
+            if (System.IO.Directory.Exists(OutputFolder))
+            {
+                dialog.InitialDirectory = OutputFolder;
+            }
+
             if (dialog.ShowDialog() == true)
             {
-                OutputFolder = System.IO.Path.GetDirectoryName(dialog.FileName) ?? string.Empty;
+                OutputFolder = dialog.FolderName;
             }
         }
 
@@ -200,6 +203,17 @@ namespace ClipStudio.ViewModels
             if (!TryEnsureFolder(OutputFolder))
             {
                 return;
+            }
+
+            SourcePath = SourcePath.Trim();
+            if (!SourcePath.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+            {
+                SourcePath = System.IO.Path.GetFullPath(SourcePath);
+                if (!System.IO.File.Exists(SourcePath))
+                {
+                    Logger.Log($"Source file not found: {SourcePath}");
+                    return;
+                }
             }
 
             if (_isRendering)
@@ -252,18 +266,41 @@ namespace ClipStudio.ViewModels
                 List<ClipCandidate>? aiCandidates = null;
                 var transcriptionService = new TranscriptionService(Logger);
                 var aiService = new AIClipFinderService(Logger);
+                TranscriptionResult? transcription = null;
 
-                try
+                bool haveKey = !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(GroqConfig.EnvVarName));
+
+                if (haveKey || RemoveFillerWordsEnabled)
                 {
-                    if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(GroqConfig.EnvVarName)))
+                    try
                     {
-                        Logger.Log("Warning: GROQ_API_KEY environment variable missing. Falling back to heuristic.");
-                        aiCandidates = null;
+                        transcription = await transcriptionService.TranscribeAsync(tempWavPath, RemoveFillerWordsEnabled, token);
                     }
-                    else
+                    catch (OperationCanceledException)
                     {
-                        var transcript = await transcriptionService.TranscribeAsync(tempWavPath, token);
+                        throw;
+                    }
+                    catch (System.IO.FileNotFoundException ex)
+                    {
+                        Logger.Log($"Warning: AI model missing. ({ex.Message})");
+                        transcription = null;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"Warning: Transcription failed. ({ex.Message})");
+                        transcription = null;
+                    }
+                }
 
+                if (!haveKey)
+                {
+                    Logger.Log("Warning: GROQ_API_KEY environment variable missing. Falling back to heuristic.");
+                    aiCandidates = null;
+                }
+                else if (transcription != null)
+                {
+                    try
+                    {
                         if (AutoClipEnabled)
                         {
                             Logger.Log("AI Automated Clip mode is ON (AI picks length 15-60s).");
@@ -273,7 +310,7 @@ namespace ClipStudio.ViewModels
                             Logger.Log("AI Automated Clip mode is OFF.");
                         }
 
-                        aiCandidates = await aiService.GetHighlightsAsync(transcript, ClipCount, 15.0, ClipLengthMultiplier, AutoClipEnabled, token);
+                        aiCandidates = await aiService.GetHighlightsAsync(transcription.Segments, ClipCount, 15.0, ClipLengthMultiplier, AutoClipEnabled, token);
 
                         if (aiCandidates == null || aiCandidates.Count == 0)
                         {
@@ -281,19 +318,18 @@ namespace ClipStudio.ViewModels
                             aiCandidates = null;
                         }
                     }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"Warning: AI highlight selector failed. Falling back to heuristic. ({ex.Message})");
+                        aiCandidates = null;
+                    }
                 }
-                catch (OperationCanceledException)
+                else
                 {
-                    throw;
-                }
-                catch (System.IO.FileNotFoundException ex)
-                {
-                    Logger.Log($"Warning: AI model missing. Falling back to heuristic. ({ex.Message})");
-                    aiCandidates = null;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Log($"Warning: AI highlight selector failed. Falling back to heuristic. ({ex.Message})");
                     aiCandidates = null;
                 }
 
@@ -338,13 +374,15 @@ namespace ClipStudio.ViewModels
                 // 6. Filler words
                 if (RemoveFillerWordsEnabled)
                 {
-                    StatusText = "Detecting Filler Words...";
-                    var fillerService = new TranscriptionService(Logger);
-                    try
+                    if (transcription != null)
                     {
-                        _fillerWords = await fillerService.DetectFillerWordsAsync(tempWavPath, token);
+                        StatusText = "Detecting Filler Words...";
+                        _fillerWords = transcriptionService.DetectFillerSpans(transcription.Words);
                     }
-                    catch (System.IO.FileNotFoundException) { }
+                    else
+                    {
+                        Logger.Log("Filler word removal skipped: no transcript available.");
+                    }
                 }
 
                 ProgressValue = 90;
@@ -402,6 +440,8 @@ namespace ClipStudio.ViewModels
                 Logger.Log("Review canceled.");
                 return;
             }
+
+            if (!StartCommand.IsRunning && !ApproveAndRenderCommand.IsRunning) return;
 
             if (_cancellationTokenSource != null && !_cancellationTokenSource.IsCancellationRequested)
             {
@@ -524,6 +564,27 @@ namespace ClipStudio.ViewModels
         }
 
         public string DisplayText => $"[{_clip.StartTime:hh\\:mm\\:ss} - {_clip.EndTime:hh\\:mm\\:ss}] ({_clip.Duration:F1}s) Score: {_clip.Score:F2}";
+
+        public string Reason => _clip.Reason;
+
+        public string FullTranscript => _clip.Transcript;
+
+        public string Preview
+        {
+            get
+            {
+                if (string.IsNullOrWhiteSpace(_clip.Transcript))
+                    return string.Empty;
+
+                var collapsed = System.Text.RegularExpressions.Regex.Replace(_clip.Transcript, @"\s+", " ").Trim();
+                if (collapsed.Length > 140)
+                    return collapsed.Substring(0, 140) + "...";
+                return collapsed;
+            }
+        }
+
+        public bool HasReason => !string.IsNullOrWhiteSpace(Reason);
+        public bool HasPreview => !string.IsNullOrWhiteSpace(Preview);
 
         public ClipCandidate GetClip() => _clip;
     }

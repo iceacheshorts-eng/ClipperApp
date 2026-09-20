@@ -24,6 +24,7 @@ namespace ClipStudio.Services
         }
 
         private const double AutoMinSeconds = 15.0;
+        private const double AutoMinAcceptSeconds = 12.0;
         private const double AutoMaxSeconds = 60.0;
 
         public async Task<List<ClipCandidate>> GetHighlightsAsync(
@@ -62,11 +63,11 @@ namespace ClipStudio.Services
             foreach (var c in allCandidates.OrderByDescending(x => x.Score))
             {
                 if (finalCandidates.Count >= count) break;
-                
+
                 // Ensure no overlapping clips
-                bool overlaps = finalCandidates.Any(existing => 
+                bool overlaps = finalCandidates.Any(existing =>
                     !(c.StartTime.TotalSeconds >= existing.EndTime.TotalSeconds || c.EndTime.TotalSeconds <= existing.StartTime.TotalSeconds));
-                
+
                 if (!overlaps)
                 {
                     finalCandidates.Add(c);
@@ -180,9 +181,9 @@ namespace ClipStudio.Services
                 using var request = new HttpRequestMessage(HttpMethod.Post, GroqConfig.BaseUrl);
                 request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
                 request.Content = content;
-                
+
                 response = await _httpClient.SendAsync(request, ct);
-                
+
                 if (!response.IsSuccessStatusCode)
                 {
                     var responseBody = await response.Content.ReadAsStringAsync(ct);
@@ -230,7 +231,7 @@ namespace ClipStudio.Services
                 {
                     throw new Exception("Empty response from Groq API.");
                 }
-                
+
                 List<HighlightResponse> highlights;
                 try
                 {
@@ -247,15 +248,15 @@ namespace ClipStudio.Services
                     using var retryRequest = new HttpRequestMessage(HttpMethod.Post, GroqConfig.BaseUrl);
                     retryRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
                     retryRequest.Content = new StringContent(requestJson, Encoding.UTF8, "application/json");
-                    
+
                     var response2 = await _httpClient.SendAsync(retryRequest, ct);
                     response2.EnsureSuccessStatusCode();
                     var responseString2 = await response2.Content.ReadAsStringAsync(ct);
                     var result2 = JsonSerializer.Deserialize<GroqResponse>(responseString2);
                     var contentString2 = result2?.Choices?.FirstOrDefault()?.Message?.Content;
-                    
+
                     if (string.IsNullOrEmpty(contentString2)) throw new Exception("Empty response on retry.");
-                    
+
                     var parsed = JsonSerializer.Deserialize<GroqHighlightsResponse>(contentString2, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                     highlights = parsed?.Highlights ?? new List<HighlightResponse>();
                     if (highlights.Count == 0)
@@ -332,7 +333,7 @@ namespace ClipStudio.Services
                     }
 
                     // Final duration check
-                    double minLimitSeconds = autoLength ? AutoMinSeconds : (minSeconds * 0.6);
+                    double minLimitSeconds = autoLength ? AutoMinAcceptSeconds : (minSeconds * 0.6);
                     if (duration < minLimitSeconds)
                     {
                         _logger.Log($"Rejecting highlight: duration ({duration}s) is too short.");
@@ -374,7 +375,7 @@ namespace ClipStudio.Services
                 return new List<ClipCandidate>();
             }
         }
-        
+
         private class GroqApiException : Exception
         {
             public GroqApiException(string message) : base(message) { }
@@ -428,7 +429,7 @@ namespace ClipStudio.Services
             {
                 if (transcript[i].Start - targetTime > window)
                     break;
-                
+
                 var text = transcript[i].Text.TrimEnd();
                 if (text.EndsWith(".") || text.EndsWith("!") || text.EndsWith("?"))
                 {

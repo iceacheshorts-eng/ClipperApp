@@ -92,10 +92,10 @@ namespace ClipStudio.Services
         }
 
         private const double AutoMinSeconds = 15.0;
-        private const double AutoMaxSeconds = 60.0;
         private const double AutoStepSeconds = 5.0;
         private const double HookSeconds = 3.0;
         private const double HookWeight = 0.3;
+        private const double AutoLengthBonus = 0.08;
 
         // Allowed lengths for auto fallback
         private static readonly int[] AutoCandidateLengths = { 15, 20, 30, 45, 60 };
@@ -166,6 +166,8 @@ namespace ClipStudio.Services
                         double hook = hookSum / HookSeconds; // We assume there's always at least HookSeconds remaining if L >= 15
 
                         double finalScore = (1 - HookWeight) * baseScore + HookWeight * hook;
+
+                        finalScore *= 1.0 + AutoLengthBonus * Math.Log2(L / AutoMinSeconds);
 
                         potentialWindows.Add((i, L, finalScore));
                     }
