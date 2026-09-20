@@ -46,6 +46,35 @@ namespace ClipStudio.Services
             public List<Participant> Participants = new List<Participant>();
         }
 
+        public List<CropPoint> BuildClipTrack(List<FaceDetection> detections, double windowStart, double windowEnd, double fps, int sourceWidth, int sourceHeight)
+        {
+            var shiftedDetections = new List<FaceDetection>();
+            foreach (var d in detections)
+            {
+                if (d.T >= windowStart && d.T <= windowEnd)
+                {
+                    shiftedDetections.Add(new FaceDetection
+                    {
+                        T = d.T - windowStart,
+                        Type = d.Type,
+                        Cx = d.Cx,
+                        Cy = d.Cy,
+                        W = d.W,
+                        H = d.H
+                    });
+                }
+            }
+
+            var track = BuildTrack(shiftedDetections, windowEnd - windowStart, fps, sourceWidth, sourceHeight);
+
+            foreach (var point in track)
+            {
+                point.T += windowStart;
+            }
+
+            return track;
+        }
+
         public List<CropPoint> BuildTrack(List<FaceDetection> detections, double videoDuration, double fps, int sourceWidth, int sourceHeight)
         {
             var track = new List<CropPoint>();

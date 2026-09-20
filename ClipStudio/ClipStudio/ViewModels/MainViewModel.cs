@@ -12,6 +12,9 @@ namespace ClipStudio.ViewModels
 {
     public partial class MainViewModel : ObservableObject
     {
+        private const double TrackLeadInSeconds = 3.0;
+        private const double TrackLeadOutSeconds = 1.0;
+
         public IActivityLogger Logger { get; }
 
         [ObservableProperty]
@@ -61,7 +64,6 @@ namespace ClipStudio.ViewModels
 
         private CancellationTokenSource? _cancellationTokenSource;
         private string? _downloadedFilePath;
-        private List<CropTrackBuilder.CropPoint>? _cropTrack;
         private List<TranscriptionService.CutSpan>? _fillerWords;
         private bool _isRendering = false;
 
@@ -216,7 +218,6 @@ namespace ClipStudio.ViewModels
             IsReviewing = false;
             ProposedClips.Clear();
             _downloadedFilePath = null;
-            _cropTrack = null;
             _fillerWords = null;
             string? tempWavPath = null;
 
@@ -299,20 +300,27 @@ namespace ClipStudio.ViewModels
                 var loudnessScores = await loudnessTask;
                 ProgressValue = 50;
 
-                // 4. Face Tracking (Needed for Candidate Generation if no AI, and for Cropping)
-                StatusText = "Tracking Faces...";
-                ProgressValue = 60;
-                var faceTracker = new FaceTrackerService(Logger);
+                // 4. Face Tracking (Needed for Candidate Generation if no AI)
                 List<FaceDetection> detections = new();
-                try
+                if (aiCandidates == null || aiCandidates.Count == 0)
                 {
-                    detections = await faceTracker.TrackFacesAsync(videoPath, token);
+                    StatusText = "Tracking Faces...";
+                    ProgressValue = 60;
+                    var faceTracker = new FaceTrackerService(Logger);
+                    try
+                    {
+                        detections = await faceTracker.TrackFacesAsync(videoPath, token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"Warning: face tracking failed ({ex.Message}); continuing without face data.");
+                        detections = new List<FaceDetection>();
+                    }
                 }
-                catch (System.IO.FileNotFoundException) { }
-
-                var videoInfo = ReadVideoInfo(videoPath);
-                var trackBuilder = new CropTrackBuilder();
-                _cropTrack = trackBuilder.BuildTrack(detections, (loudnessScores.Count * 1.0), videoInfo.Fps, videoInfo.Width, videoInfo.Height); // Approx duration
 
                 // 5. Generate candidate clips
                 StatusText = "Finding Highlights...";
@@ -422,6 +430,10 @@ namespace ClipStudio.ViewModels
                 int total = clipsToRender.Count;
                 int current = 0;
 
+                var info = ReadVideoInfo(sourceVideo);
+                var faceTracker = new FaceTrackerService(Logger);
+                var trackBuilder = new CropTrackBuilder();
+
                 foreach (var clipVM in clipsToRender)
                 {
                     token.ThrowIfCancellationRequested();
@@ -430,7 +442,31 @@ namespace ClipStudio.ViewModels
                     string outName = $"Clip_{current + 1}_{Guid.NewGuid().ToString().Substring(0,4)}.mp4";
                     string outPath = System.IO.Path.Combine(OutputFolder, outName);
 
-                    await creator.RenderClipAsync(sourceVideo, outPath, clip, _cropTrack ?? new List<CropTrackBuilder.CropPoint>(), _fillerWords, token);
+                    double winStart = Math.Max(0, clip.StartTime.TotalSeconds - TrackLeadInSeconds);
+                    double winEnd = clip.EndTime.TotalSeconds + TrackLeadOutSeconds;
+
+                    StatusText = $"Tracking faces (clip {current + 1}/{total})...";
+
+                    List<FaceDetection> detections;
+                    try
+                    {
+                        detections = await faceTracker.TrackFacesAsync(sourceVideo, new[] { (winStart, winEnd) }, token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Log($"Warning: face tracking failed ({ex.Message}); using a center crop.");
+                        detections = new List<FaceDetection>();
+                    }
+
+                    var clipTrack = trackBuilder.BuildClipTrack(detections, winStart, winEnd, info.Fps, info.Width, info.Height);
+
+                    StatusText = $"Rendering clip {current + 1}/{total}...";
+
+                    await creator.RenderClipAsync(sourceVideo, outPath, clip, clipTrack, _fillerWords, token);
 
                     current++;
                     ProgressValue = 90 + (int)((current / (double)total) * 10);
@@ -463,7 +499,6 @@ namespace ClipStudio.ViewModels
             StatusText = "Ready";
             IsReviewing = false;
             ProposedClips.Clear();
-            _cropTrack = null;
             _fillerWords = null;
 
             DeleteDownloadedFile();

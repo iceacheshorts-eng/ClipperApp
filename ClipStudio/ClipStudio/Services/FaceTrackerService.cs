@@ -12,6 +12,8 @@ namespace ClipStudio.Services
 {
     public class FaceTrackerService
     {
+        private const double SeekThresholdSeconds = 8.0;
+
         private readonly IActivityLogger _logger;
 
         public FaceTrackerService(IActivityLogger logger)
@@ -45,7 +47,12 @@ namespace ClipStudio.Services
             }
         }
 
-        public async Task<List<FaceDetection>> TrackFacesAsync(string videoPath, CancellationToken cancellationToken)
+        public Task<List<FaceDetection>> TrackFacesAsync(string videoPath, CancellationToken ct)
+        {
+            return TrackFacesAsync(videoPath, null, ct);
+        }
+
+        public async Task<List<FaceDetection>> TrackFacesAsync(string videoPath, IReadOnlyList<(double Start, double End)>? ranges, CancellationToken ct)
         {
             _logger.Log("Starting advanced AI face tracking (SSD ResNet-10)...");
 
@@ -73,67 +80,187 @@ namespace ClipStudio.Services
 
                 using var frame = new Mat();
 
-                int frameIndex = 0;
-
                 // Sample 5 frames per second for high accuracy and smooth tracking
                 double targetFps = 5.0;
                 int skipFrames = Math.Max(1, (int)Math.Round(fps / targetFps));
 
-                int framesProcessed = 0;
-                int totalSampleFrames = totalFrames / skipFrames;
-
-                while (capture.Read(frame) && !frame.Empty())
+                // Normalize ranges
+                var spans = new List<(int StartFrame, int EndFrame)>();
+                if (ranges == null)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-
-                    if (frameIndex % skipFrames == 0)
+                    spans.Add((0, int.MaxValue));
+                }
+                else
+                {
+                    var sorted = new List<(double Start, double End)>(ranges);
+                    for (int i = 0; i < sorted.Count; i++)
                     {
-                        // The SSD model expects 300x300 input blob
-                        using var blob = CvDnn.BlobFromImage(frame, 1.0, new Size(300, 300), new Scalar(104.0, 177.0, 123.0), false, false);
+                        sorted[i] = (Math.Max(0, sorted[i].Start), sorted[i].End);
+                    }
+                    sorted.Sort((a, b) => a.Start.CompareTo(b.Start));
 
-                        net!.SetInput(blob, "data");
-                        using var detection = net.Forward("detection_out");
-
-                        // detection output is 4D: [1, 1, N, 7]
-                        var detectionMat = Mat.FromPixelData(detection!.Size(2), detection!.Size(3), MatType.CV_32F, detection!.Data);
-
-                        double t = frameIndex / fps;
-
-                        int rows = detectionMat.Rows;
-                        for (int i = 0; i < rows; i++)
+                    var merged = new List<(double Start, double End)>();
+                    foreach (var r in sorted)
+                    {
+                        if (merged.Count > 0)
                         {
-                            float confidence = detectionMat.At<float>(i, 2);
-
-                            // Strict confidence threshold for accuracy
-                            if (confidence > 0.5)
+                            var last = merged[merged.Count - 1];
+                            if (r.Start - last.End <= 1.0)
                             {
-                                float x1 = detectionMat.At<float>(i, 3);
-                                float y1 = detectionMat.At<float>(i, 4);
-                                float x2 = detectionMat.At<float>(i, 5);
-                                float y2 = detectionMat.At<float>(i, 6);
+                                merged[merged.Count - 1] = (last.Start, Math.Max(last.End, r.End));
+                            }
+                            else
+                            {
+                                merged.Add(r);
+                            }
+                        }
+                        else
+                        {
+                            merged.Add(r);
+                        }
+                    }
 
-                                detections.Add(new FaceDetection
+                    foreach (var m in merged)
+                    {
+                        int sf = (int)Math.Floor(m.Start * fps);
+                        int ef = m.End == double.MaxValue ? int.MaxValue : (int)Math.Ceiling(m.End * fps);
+                        spans.Add((sf, ef));
+                    }
+                }
+
+                long totalSampleFrames = 0;
+                bool showTotal = totalFrames > 0;
+                if (showTotal)
+                {
+                    long framesToProcess = 0;
+                    if (ranges == null)
+                    {
+                        framesToProcess = totalFrames;
+                    }
+                    else
+                    {
+                        foreach (var span in spans)
+                        {
+                            int ef = Math.Min(span.EndFrame, totalFrames - 1);
+                            framesToProcess += (ef - span.StartFrame + 1);
+                        }
+                    }
+                    totalSampleFrames = framesToProcess / skipFrames;
+                }
+
+                int framesProcessed = 0;
+                int frameIndex = 0;
+                bool endOfVideo = false;
+
+                foreach (var span in spans)
+                {
+                    if (endOfVideo) break;
+                    if (span.EndFrame < frameIndex) continue;
+
+                    if (span.StartFrame > frameIndex)
+                    {
+                        double gapSeconds = (span.StartFrame - frameIndex) / fps;
+                        if (gapSeconds > SeekThresholdSeconds)
+                        {
+                            if (capture.Set(VideoCaptureProperties.PosFrames, span.StartFrame))
+                            {
+                                int landedFrame = (int)Math.Round(capture.Get(VideoCaptureProperties.PosFrames));
+                                double diffSeconds = Math.Abs(span.StartFrame - landedFrame) / fps;
+                                if (diffSeconds > 1.0)
                                 {
-                                    T = t,
-                                    Type = "face",
-                                    Cx = (x1 + x2) / 2.0,
-                                    Cy = (y1 + y2) / 2.0,
-                                    W = Math.Abs(x2 - x1),
-                                    H = Math.Abs(y2 - y1)
-                                });
+                                    _logger.Log($"Warning: Seek to frame {span.StartFrame} landed at {landedFrame}");
+                                }
+                                else
+                                {
+                                    _logger.Log($"Seek to frame {span.StartFrame} landed at {landedFrame}");
+                                }
+                                frameIndex = landedFrame;
                             }
                         }
 
-                        framesProcessed++;
-                        if (framesProcessed % 50 == 0)
+                        while (frameIndex < span.StartFrame)
                         {
-                            _logger.Log($"Face Tracking: Processed {framesProcessed} out of {totalSampleFrames} frames...");
+                            ct.ThrowIfCancellationRequested();
+                            if (!capture.Grab())
+                            {
+                                endOfVideo = true;
+                                break;
+                            }
+                            frameIndex++;
                         }
                     }
-                    frameIndex++;
+
+                    if (endOfVideo) break;
+
+                    while (frameIndex <= span.EndFrame)
+                    {
+                        ct.ThrowIfCancellationRequested();
+
+                        if (!capture.Grab())
+                        {
+                            endOfVideo = true;
+                            break;
+                        }
+
+                        if (frameIndex % skipFrames == 0)
+                        {
+                            if (capture.Retrieve(frame) && !frame.Empty())
+                            {
+                                // The SSD model expects 300x300 input blob
+                                using var blob = CvDnn.BlobFromImage(frame, 1.0, new Size(300, 300), new Scalar(104.0, 177.0, 123.0), false, false);
+
+                                net!.SetInput(blob, "data");
+                                using var detection = net.Forward("detection_out");
+
+                                // detection output is 4D: [1, 1, N, 7]
+                                var detectionMat = Mat.FromPixelData(detection!.Size(2), detection!.Size(3), MatType.CV_32F, detection!.Data);
+
+                                double t = frameIndex / fps;
+
+                                int rows = detectionMat.Rows;
+                                for (int i = 0; i < rows; i++)
+                                {
+                                    float confidence = detectionMat.At<float>(i, 2);
+
+                                    // Strict confidence threshold for accuracy
+                                    if (confidence > 0.5)
+                                    {
+                                        float x1 = detectionMat.At<float>(i, 3);
+                                        float y1 = detectionMat.At<float>(i, 4);
+                                        float x2 = detectionMat.At<float>(i, 5);
+                                        float y2 = detectionMat.At<float>(i, 6);
+
+                                        detections.Add(new FaceDetection
+                                        {
+                                            T = t,
+                                            Type = "face",
+                                            Cx = (x1 + x2) / 2.0,
+                                            Cy = (y1 + y2) / 2.0,
+                                            W = Math.Abs(x2 - x1),
+                                            H = Math.Abs(y2 - y1)
+                                        });
+                                    }
+                                }
+
+                                framesProcessed++;
+                                if (framesProcessed % 50 == 0)
+                                {
+                                    if (showTotal)
+                                    {
+                                        _logger.Log($"Face Tracking: Processed {framesProcessed} out of {totalSampleFrames} frames...");
+                                    }
+                                    else
+                                    {
+                                        _logger.Log($"Face Tracking: Processed {framesProcessed} frames...");
+                                    }
+                                }
+                            }
+                        }
+                        frameIndex++;
+                    }
                 }
 
-            }, cancellationToken);
+            }, ct);
 
             _logger.Log($"Face tracking completed. Found {detections.Count} detection points.");
             return detections;
