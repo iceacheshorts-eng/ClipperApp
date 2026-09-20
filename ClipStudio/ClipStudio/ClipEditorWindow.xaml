@@ -8,7 +8,7 @@
         xmlns:materialDesign="http://materialdesigninxaml.net/winfx/xaml/themes"
         xmlns:converters="clr-namespace:ClipStudio.Converters"
         mc:Ignorable="d"
-        Title="Edit clip" Height="600" Width="900"
+        Title="Edit clip" Height="700" Width="1150"
         WindowStartupLocation="CenterOwner"
         TextElement.Foreground="{DynamicResource MaterialDesignBody}"
         TextElement.FontWeight="Regular"
@@ -18,6 +18,7 @@
         Background="{DynamicResource MaterialDesignPaper}"
         FontFamily="{DynamicResource MaterialDesignFont}"
         Loaded="Window_Loaded"
+        PreviewKeyDown="Window_PreviewKeyDown"
         Closing="Window_Closing">
 
     <Window.Resources>
@@ -34,6 +35,9 @@
             <Setter Property="Foreground" Value="{DynamicResource MaterialDesignBody}" />
             <Setter Property="VerticalAlignment" Value="Center" />
             <Style.Triggers>
+                <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                    <Setter Property="Background" Value="#3342A5F5" />
+                </DataTrigger>
                 <DataTrigger Binding="{Binding IsOutside}" Value="True">
                     <Setter Property="Opacity" Value="0.35" />
                 </DataTrigger>
@@ -68,14 +72,74 @@
     </Window.Resources>
 
     <Grid Margin="16">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="Auto" />
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="460" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
 
-        <!-- Top row: info and warnings -->
+        <!-- Preview Column -->
+        <Grid Grid.Column="0" Margin="0,0,16,0">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Video Player -->
+            <Grid x:Name="PreviewGrid" Grid.Row="0" Background="Black" SizeChanged="PreviewGrid_SizeChanged">
+                <MediaElement x:Name="Player"
+                              LoadedBehavior="Manual"
+                              UnloadedBehavior="Manual"
+                              ScrubbingEnabled="True"
+                              Stretch="Uniform"
+                              IsMuted="False"
+                              MediaOpened="Player_MediaOpened"
+                              MediaFailed="Player_MediaFailed"/>
+                <Canvas x:Name="GuideCanvas" IsHitTestVisible="False" />
+            </Grid>
+
+            <!-- Preview Controls -->
+            <StackPanel Grid.Row="1" Margin="0,16,0,0">
+                <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                    <Button Content="Play" x:Name="PlayPauseButton" Click="PlayPauseButton_Click" Style="{StaticResource MaterialDesignOutlinedButton}" Margin="0,0,8,0" />
+                    <Button Content="Restart" x:Name="RestartButton" Click="RestartButton_Click" Style="{StaticResource MaterialDesignOutlinedButton}" />
+                </StackPanel>
+
+                <Slider x:Name="SeekSlider"
+                        Minimum="0" Maximum="1"
+                        ValueChanged="SeekSlider_ValueChanged"
+                        Margin="0,0,0,8"/>
+
+                <TextBlock x:Name="TimeLabel" Text="0:00 / 0:00" HorizontalAlignment="Right" Margin="0,0,0,8" />
+
+                <TextBlock Text="{Binding PreviewError}" Foreground="IndianRed" TextWrapping="Wrap" Margin="0,0,0,8">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Style.Triggers>
+                                <Trigger Property="Text" Value="{x:Null}">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </Trigger>
+                                <Trigger Property="Text" Value="">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                </Trigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+
+                <TextBlock Text="Guide is approximate: the real crop follows faces." FontSize="11" Foreground="Gray" />
+            </StackPanel>
+        </Grid>
+
+        <!-- Editor Column -->
+        <Grid Grid.Column="1">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="Auto" />
+                <RowDefinition Height="*" />
+                <RowDefinition Height="Auto" />
+            </Grid.RowDefinitions>
+
+            <!-- Top row: info and warnings -->
         <StackPanel Grid.Row="0" Margin="0,0,0,16">
             <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
                 <TextBlock Text="Original duration: " FontWeight="Bold" />
@@ -107,7 +171,7 @@
 
         <!-- Center: text-based editor -->
         <ScrollViewer Grid.Row="2" Background="{DynamicResource MaterialDesignTextFieldBoxBackground}" Padding="16" Margin="0,0,0,16">
-            <ItemsControl ItemsSource="{Binding Words}">
+            <ItemsControl x:Name="WordsItemsControl" ItemsSource="{Binding Words}">
                 <ItemsControl.ItemsPanel>
                     <ItemsPanelTemplate>
                         <WrapPanel />
@@ -118,7 +182,13 @@
                         <Button Content="{Binding Text}"
                                 Command="{Binding DataContext.WordClickCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                 CommandParameter="{Binding}"
-                                Style="{StaticResource WordButtonStyle}" />
+                                Style="{StaticResource WordButtonStyle}">
+                            <Button.ContextMenu>
+                                <ContextMenu>
+                                    <MenuItem Header="Play from here" Click="PlayFromHere_Click" />
+                                </ContextMenu>
+                            </Button.ContextMenu>
+                        </Button>
                     </DataTemplate>
                 </ItemsControl.ItemTemplate>
             </ItemsControl>
@@ -144,6 +214,7 @@
                 <Button Content="Cancel" Command="{Binding CancelCommand}" Style="{StaticResource MaterialDesignOutlinedButton}" Margin="0,0,8,0" />
                 <Button Content="Apply" Command="{Binding ApplyCommand}" />
             </StackPanel>
+        </Grid>
         </Grid>
     </Grid>
 </Window>
