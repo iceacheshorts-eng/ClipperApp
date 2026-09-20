@@ -60,6 +60,16 @@ namespace ClipStudio.Services
             return false;
         }
 
+        public (string Name, long Size) GetModelFingerprint()
+        {
+            if (System.IO.File.Exists(_modelPath))
+            {
+                var fileInfo = new System.IO.FileInfo(_modelPath);
+                return (fileInfo.Name, fileInfo.Length);
+            }
+            return (System.IO.Path.GetFileName(_modelPath) ?? "unknown", 0);
+        }
+
         public async Task<TranscriptionResult> TranscribeAsync(string wavPath, bool useFillerPrompt, bool useGpu, bool wordLevelTimestamps, CancellationToken ct)
         {
             if (!File.Exists(_modelPath))

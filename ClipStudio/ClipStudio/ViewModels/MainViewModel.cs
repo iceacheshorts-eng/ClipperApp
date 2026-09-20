@@ -107,6 +107,9 @@ namespace ClipStudio.ViewModels
             }
         }
 
+        [ObservableProperty]
+        private bool _reuseSavedData = true;
+
         public MainViewModel(IActivityLogger logger)
         {
             Logger = logger;
@@ -118,6 +121,37 @@ namespace ClipStudio.ViewModels
             }
             catch
             {
+            }
+            try
+            {
+                ProjectStore.CleanupOld(TimeSpan.FromDays(60));
+            }
+            catch
+            {
+            }
+        }
+
+        [RelayCommand]
+        private void ClearSavedData()
+        {
+            if (_isRendering) return;
+
+            var result = System.Windows.MessageBox.Show(
+                "Delete all saved transcripts?",
+                "Clear Saved Data",
+                System.Windows.MessageBoxButton.YesNo,
+                System.Windows.MessageBoxImage.Question);
+
+            if (result == System.Windows.MessageBoxResult.Yes)
+            {
+                if (ProjectStore.ClearAll())
+                {
+                    Logger.Log("Saved data cleared.");
+                }
+                else
+                {
+                    Logger.Log("Could not clear saved data.");
+                }
             }
         }
 
@@ -281,6 +315,8 @@ namespace ClipStudio.ViewModels
                     _downloadedFilePath = videoPath;
                 }
 
+                string? sourceKey = ProjectStore.GetSourceKey(videoPath, _downloadedFilePath != null);
+
                 ProgressValue = 0;
                 StatusText = "Extracting Audio...";
 
@@ -305,7 +341,24 @@ namespace ClipStudio.ViewModels
                 {
                     try
                     {
-                        transcription = await transcriptionService.TranscribeAsync(tempWavPath, RemoveFillerWordsEnabled, UseGpuForTranscription, false, token);
+                        var fp = transcriptionService.GetModelFingerprint();
+                        if (ReuseSavedData && sourceKey != null)
+                        {
+                            transcription = ProjectStore.TryLoadTranscript(sourceKey, fp.Name, fp.Size, RemoveFillerWordsEnabled, false);
+                            if (transcription != null)
+                            {
+                                Logger.Log($"Loaded saved transcript ({transcription.Words.Count} words, {transcription.Segments.Count} segments); skipping Whisper");
+                            }
+                        }
+                        if (transcription == null)
+                        {
+                            transcription = await transcriptionService.TranscribeAsync(tempWavPath, RemoveFillerWordsEnabled, UseGpuForTranscription, false, token);
+                            if (sourceKey != null)
+                            {
+                                ProjectStore.SaveTranscript(sourceKey, fp.Name, fp.Size, RemoveFillerWordsEnabled, false, transcription);
+                                Logger.Log("Saved transcript for reuse");
+                            }
+                        }
                     }
                     catch (OperationCanceledException)
                     {

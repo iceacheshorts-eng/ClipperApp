@@ -20,5 +20,7 @@ To use the LLM selection, create an API key at https://console.groq.com/keys. Se
 ## Usage
 Paste a URL or pick a file, choose your options, and click Start. After processing, a review screen allows for manual adjustments before rendering. The default output folder is `Videos\ClipStudio`.
 
+Saved transcripts are stored in `%LOCALAPPDATA%\ClipStudio\projects` to speed up re-runs on the same video. Entries are automatically removed after 60 days, and the "Clear saved data" button deletes them all manually.
+
 ## Troubleshooting
 Common issues include a missing Whisper model or a missing Groq key. Additionally, non-ASCII characters in local source paths can prevent OpenCV from opening the video; when this happens, face tracking falls back to a simple center crop. Check the application log for further details.
