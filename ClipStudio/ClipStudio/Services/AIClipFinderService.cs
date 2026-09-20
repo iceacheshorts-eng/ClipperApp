@@ -51,11 +51,21 @@ namespace ClipStudio.Services
             var chunks = ChunkTranscript(transcript, maxSentences: 80);
             var allCandidates = new List<ClipCandidate>();
 
+            int emptyChunks = 0;
             // Request highlights per chunk (sequentially to respect basic rate limits)
             foreach (var chunk in chunks)
             {
                 var candidates = await GetHighlightsForChunkAsync(chunk, apiKey, count, minSeconds, maxSeconds, autoLength, transcript, ct);
+                if (candidates.Count == 0)
+                {
+                    emptyChunks++;
+                }
                 allCandidates.AddRange(candidates);
+            }
+
+            if (emptyChunks > 0)
+            {
+                _logger.Log($"Groq: {emptyChunks} of {chunks.Count} chunks returned no clips");
             }
 
             // Return top unique results
@@ -125,66 +135,22 @@ namespace ClipStudio.Services
                 }
             }
 
-            var payload = new
-            {
-                model = GroqConfig.ModelId,
-                max_tokens = 2048,
-                messages = new[]
-                {
-                    new { role = "system", content = "You must respond ONLY with valid JSON. Your entire output must strictly match the requested JSON schema. Do not include markdown formatting, backticks, or conversational text." },
-                    new { role = "user", content = promptText.ToString() }
-                },
-                response_format = new
-                {
-                    type = "json_schema",
-                    json_schema = new
-                    {
-                        name = "highlights_schema",
-                        strict = true,
-                        schema = new
-                        {
-                            type = "object",
-                            properties = new
-                            {
-                                highlights = new
-                                {
-                                    type = "array",
-                                    items = new
-                                    {
-                                        type = "object",
-                                        properties = new
-                                        {
-                                            startSegment = new { type = "integer" },
-                                            endSegment = new { type = "integer" },
-                                            score = new { type = "number" },
-                                            reason = new { type = "string" }
-                                        },
-                                        required = new[] { "startSegment", "endSegment", "score", "reason" },
-                                        additionalProperties = false
-                                    }
-                                }
-                            },
-                            required = new[] { "highlights" },
-                            additionalProperties = false
-                        }
-                    }
-                }
-            };
-
-            var requestJson = JsonSerializer.Serialize(payload);
-            using var content = new StringContent(requestJson, Encoding.UTF8, "application/json");
-
-            HttpResponseMessage? response = null;
             var minIndex = chunk.Count > 0 ? chunk[0].Index : 0;
             var maxIndex = chunk.Count > 0 ? chunk[^1].Index : 0;
 
             try
             {
-                using var request = new HttpRequestMessage(HttpMethod.Post, GroqConfig.BaseUrl);
-                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-                request.Content = content;
+                string requestJson = BuildPayload(promptText.ToString(), strictSchema: true);
 
-                response = await _httpClient.SendAsync(request, ct);
+                async Task<HttpResponseMessage> SendRequestAsync(string reqJson)
+                {
+                    var request = new HttpRequestMessage(HttpMethod.Post, GroqConfig.BaseUrl);
+                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+                    request.Content = new StringContent(reqJson, Encoding.UTF8, "application/json");
+                    return await _httpClient.SendAsync(request, ct);
+                }
+
+                HttpResponseMessage response = await SendRequestAsync(requestJson);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -195,18 +161,82 @@ namespace ClipStudio.Services
                     if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
                     {
                         var retryAfter = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(5);
-                        _logger.Log($"Rate limited by Groq API. Retrying after {retryAfter.TotalSeconds} seconds...");
-                        await Task.Delay(retryAfter, ct);
+                        var wait = TimeSpan.FromSeconds(Math.Min(retryAfter.TotalSeconds, 60));
+                        _logger.Log($"Rate limited by Groq API. Retrying after {wait.TotalSeconds} seconds...");
+                        await Task.Delay(wait, ct);
 
-                        // Recreate request because it was disposed
-                        using var retryRequest = new HttpRequestMessage(HttpMethod.Post, GroqConfig.BaseUrl);
-                        retryRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-                        retryRequest.Content = new StringContent(requestJson, Encoding.UTF8, "application/json");
-
-                        response = await _httpClient.SendAsync(retryRequest, ct);
+                        response = await SendRequestAsync(requestJson);
+                        if (!response.IsSuccessStatusCode)
+                        {
+                            _logger.Log("Rate limit persisted; skipping chunk");
+                            return new List<ClipCandidate>();
+                        }
                     }
-                    else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest ||
-                             response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                    else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest)
+                    {
+                        var code = TryGetGroqErrorCode(responseBody);
+                        bool isJsonValidateFailed = code == "json_validate_failed" || responseBody.Contains("json_validate_failed", StringComparison.OrdinalIgnoreCase);
+
+                        if (isJsonValidateFailed)
+                        {
+                            _logger.Log("Groq returned json_validate_failed; retrying chunk without strict schema");
+                            string retryJson = BuildPayload(promptText.ToString(), strictSchema: false);
+                            response = await SendRequestAsync(retryJson);
+
+                            if (!response.IsSuccessStatusCode)
+                            {
+                                var retryBody = await response.Content.ReadAsStringAsync(ct);
+                                var retryTruncatedBody = retryBody.Length > 300 ? retryBody.Substring(0, 300) : retryBody;
+                                _logger.Log($"Groq API retry error: {(int)response.StatusCode} - {retryTruncatedBody}");
+
+                                if (response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+                                {
+                                    var retryAfter = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(5);
+                                    var wait = TimeSpan.FromSeconds(Math.Min(retryAfter.TotalSeconds, 60));
+                                    _logger.Log($"Rate limited by Groq API on retry. Retrying after {wait.TotalSeconds} seconds...");
+                                    await Task.Delay(wait, ct);
+
+                                    response = await SendRequestAsync(retryJson);
+                                    if (!response.IsSuccessStatusCode)
+                                    {
+                                        _logger.Log("Rate limit persisted on retry; skipping chunk");
+                                        return new List<ClipCandidate>();
+                                    }
+                                }
+                                else if (response.StatusCode == System.Net.HttpStatusCode.BadRequest)
+                                {
+                                    var retryCode = TryGetGroqErrorCode(retryBody);
+                                    bool retryIsJsonValidateFailed = retryCode == "json_validate_failed" || retryBody.Contains("json_validate_failed", StringComparison.OrdinalIgnoreCase);
+                                    if (retryIsJsonValidateFailed)
+                                    {
+                                        _logger.Log("Groq returned json_validate_failed on retry; skipping chunk");
+                                        return new List<ClipCandidate>();
+                                    }
+                                    throw new GroqApiException($"Configuration error on retry: {(int)response.StatusCode} - {retryTruncatedBody}");
+                                }
+                                else if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
+                                         response.StatusCode == System.Net.HttpStatusCode.Forbidden ||
+                                         response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                                {
+                                    throw new GroqApiException($"Configuration error on retry: {(int)response.StatusCode} - {retryTruncatedBody}");
+                                }
+                                else if ((int)response.StatusCode >= 500)
+                                {
+                                    _logger.Log($"Server error {(int)response.StatusCode} from Groq API on retry. Skipping chunk.");
+                                    return new List<ClipCandidate>();
+                                }
+                                else
+                                {
+                                    return new List<ClipCandidate>();
+                                }
+                            }
+                        }
+                        else
+                        {
+                            throw new GroqApiException($"Configuration error: {(int)response.StatusCode} - {truncatedBody}");
+                        }
+                    }
+                    else if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized ||
                              response.StatusCode == System.Net.HttpStatusCode.Forbidden ||
                              response.StatusCode == System.Net.HttpStatusCode.NotFound)
                     {
@@ -219,7 +249,8 @@ namespace ClipStudio.Services
                     }
                     else
                     {
-                         // Other non-success, maybe skip or throw? We'll let EnsureSuccessStatusCode catch it or just throw
+                        // Some other 4xx error on the first try that is not bad request, 401,403,404, or 429
+                        throw new GroqApiException($"Configuration error: {(int)response.StatusCode} - {truncatedBody}");
                     }
                 }
 
@@ -231,7 +262,8 @@ namespace ClipStudio.Services
 
                 if (string.IsNullOrEmpty(contentString))
                 {
-                    throw new Exception("Empty response from Groq API.");
+                    _logger.Log("Empty response from Groq API. Skipping chunk.");
+                    return new List<ClipCandidate>();
                 }
 
                 List<HighlightResponse> highlights;
@@ -244,27 +276,10 @@ namespace ClipStudio.Services
                         highlights = JsonSerializer.Deserialize<List<HighlightResponse>>(contentString, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new List<HighlightResponse>();
                     }
                 }
-                catch
+                catch (JsonException)
                 {
-                     _logger.Log($"Malformed JSON from LLM. Retrying once...");
-                    using var retryRequest = new HttpRequestMessage(HttpMethod.Post, GroqConfig.BaseUrl);
-                    retryRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
-                    retryRequest.Content = new StringContent(requestJson, Encoding.UTF8, "application/json");
-
-                    var response2 = await _httpClient.SendAsync(retryRequest, ct);
-                    response2.EnsureSuccessStatusCode();
-                    var responseString2 = await response2.Content.ReadAsStringAsync(ct);
-                    var result2 = JsonSerializer.Deserialize<GroqResponse>(responseString2);
-                    var contentString2 = result2?.Choices?.FirstOrDefault()?.Message?.Content;
-
-                    if (string.IsNullOrEmpty(contentString2)) throw new Exception("Empty response on retry.");
-
-                    var parsed = JsonSerializer.Deserialize<GroqHighlightsResponse>(contentString2, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
-                    highlights = parsed?.Highlights ?? new List<HighlightResponse>();
-                    if (highlights.Count == 0)
-                    {
-                        highlights = JsonSerializer.Deserialize<List<HighlightResponse>>(contentString2, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }) ?? new List<HighlightResponse>();
-                    }
+                    _logger.Log("Malformed JSON from LLM; skipping chunk.");
+                    return new List<ClipCandidate>();
                 }
 
                 var candidates = new List<ClipCandidate>();
@@ -376,6 +391,86 @@ namespace ClipStudio.Services
                 _logger.Log($"LLM AI Clip finding chunk failed: {ex.Message}. Skipping chunk.");
                 return new List<ClipCandidate>();
             }
+        }
+
+        private static string? TryGetGroqErrorCode(string body)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.TryGetProperty("error", out var errorEl) &&
+                    errorEl.TryGetProperty("code", out var codeEl) &&
+                    codeEl.ValueKind == JsonValueKind.String)
+                {
+                    return codeEl.GetString();
+                }
+            }
+            catch (JsonException)
+            {
+            }
+            return null;
+        }
+
+        private static string BuildPayload(string promptText, bool strictSchema)
+        {
+            object responseFormat;
+            if (strictSchema)
+            {
+                responseFormat = new
+                {
+                    type = "json_schema",
+                    json_schema = new
+                    {
+                        name = "highlights_schema",
+                        strict = true,
+                        schema = new
+                        {
+                            type = "object",
+                            properties = new
+                            {
+                                highlights = new
+                                {
+                                    type = "array",
+                                    items = new
+                                    {
+                                        type = "object",
+                                        properties = new
+                                        {
+                                            startSegment = new { type = "integer" },
+                                            endSegment = new { type = "integer" },
+                                            score = new { type = "number" },
+                                            reason = new { type = "string" }
+                                        },
+                                        required = new[] { "startSegment", "endSegment", "score", "reason" },
+                                        additionalProperties = false
+                                    }
+                                }
+                            },
+                            required = new[] { "highlights" },
+                            additionalProperties = false
+                        }
+                    }
+                };
+            }
+            else
+            {
+                responseFormat = new { type = "json_object" };
+            }
+
+            var payload = new
+            {
+                model = GroqConfig.ModelId,
+                max_completion_tokens = 8192,
+                reasoning_effort = "low",
+                messages = new[]
+                {
+                    new { role = "system", content = "You must respond ONLY with valid JSON. Your entire output must strictly match the requested JSON schema. Do not include markdown formatting, backticks, or conversational text." },
+                    new { role = "user", content = promptText }
+                },
+                response_format = responseFormat
+            };
+
+            return JsonSerializer.Serialize(payload);
         }
 
         private class GroqApiException : Exception
