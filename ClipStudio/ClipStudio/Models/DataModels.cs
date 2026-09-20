@@ -1,7 +1,10 @@
 using System;
+using System.Collections.Generic;
 
 namespace ClipStudio.Models
 {
+    public sealed record TimeRange(TimeSpan Start, TimeSpan End);
+
     public class ClipCandidate
     {
         public TimeSpan StartTime { get; set; }
@@ -11,6 +14,8 @@ namespace ClipStudio.Models
         public string Transcript { get; set; } = string.Empty;
         public string Reason { get; set; } = string.Empty;
         public bool IsApproved { get; set; } = true;
+        public List<TimeRange> DeletedRanges { get; set; } = new();
+        public List<WordTiming>? EditorWords { get; set; }
     }
 
     public class FaceDetection
