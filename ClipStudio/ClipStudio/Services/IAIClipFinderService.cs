@@ -7,6 +7,9 @@ namespace ClipStudio.Services
 {
     public interface IAIClipFinderService
     {
+        string? CacheSourceKey { get; set; }
+        bool ReuseSavedPicks { get; set; }
+
         Task<List<ClipCandidate>> GetHighlightsAsync(
             IReadOnlyList<TranscriptSegment> transcript,
             int count,

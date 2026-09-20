@@ -17,6 +17,13 @@ namespace ClipStudio.Services
         private readonly IActivityLogger _logger;
         private readonly HttpClient _httpClient;
 
+        public string? CacheSourceKey { get; set; }
+        public bool ReuseSavedPicks { get; set; } = true;
+
+        private const int PromptVersion = 1; // bump whenever the prompt, schema or validation logic changes
+        private const int ChunkSize = 80;
+        private int _failedChunks;
+
         public AIClipFinderService(IActivityLogger logger)
         {
             _logger = logger;
@@ -35,6 +42,7 @@ namespace ClipStudio.Services
             bool autoLength,
             CancellationToken ct)
         {
+            _failedChunks = 0;
             string apiKey = Environment.GetEnvironmentVariable(GroqConfig.EnvVarName) ?? string.Empty;
             if (string.IsNullOrEmpty(apiKey))
             {
@@ -48,27 +56,63 @@ namespace ClipStudio.Services
             }
 
             // Chunk transcripts if they are extremely long to avoid LLM context / output issues
-            var chunks = ChunkTranscript(transcript, maxSentences: 80);
+            var chunks = ChunkTranscript(transcript, maxSentences: ChunkSize);
             var allCandidates = new List<ClipCandidate>();
 
-            int emptyChunks = 0;
-            int chunkIndex = 1;
-            // Request highlights per chunk (sequentially to respect basic rate limits)
-            foreach (var chunk in chunks)
+            string? configKey = null;
+            if (CacheSourceKey != null)
             {
-                _logger.Log($"Analyzing chunk {chunkIndex}/{chunks.Count}...");
-                var candidates = await GetHighlightsForChunkAsync(chunk, apiKey, count, minSeconds, maxSeconds, autoLength, transcript, ct);
-                if (candidates.Count == 0)
-                {
-                    emptyChunks++;
-                }
-                allCandidates.AddRange(candidates);
-                chunkIndex++;
+                double formatMin = autoLength ? 0 : minSeconds;
+                double formatMax = autoLength ? 0 : maxSeconds;
+                configKey = $"v{PromptVersion}|c{ChunkSize}|m{GroqConfig.ModelId}|a{autoLength}|min{formatMin.ToString(System.Globalization.CultureInfo.InvariantCulture)}|max{formatMax.ToString(System.Globalization.CultureInfo.InvariantCulture)}|t{ProjectStore.TranscriptFingerprint(transcript)}";
             }
 
-            if (emptyChunks > 0)
+            bool loadedFromCache = false;
+            if (ReuseSavedPicks && CacheSourceKey != null && configKey != null)
             {
-                _logger.Log($"Groq: {emptyChunks} of {chunks.Count} chunks returned no clips");
+                var cached = ProjectStore.TryLoadHighlights(CacheSourceKey, configKey);
+                if (cached != null && cached.PerChunkCount >= count && cached.Clips.Count > 0)
+                {
+                    allCandidates = cached.Clips.Select(c => new ClipCandidate
+                    {
+                        StartTime = c.Start,
+                        EndTime = c.End,
+                        Score = c.Score,
+                        Reason = c.Reason,
+                        Transcript = c.Transcript
+                    }).ToList();
+                    _logger.Log($"Loaded {allCandidates.Count} saved AI picks (saved {cached.SavedUtc:yyyy-MM-dd HH:mm} UTC); skipping Groq");
+                    loadedFromCache = true;
+                }
+            }
+
+            if (!loadedFromCache)
+            {
+                int emptyChunks = 0;
+                int chunkIndex = 1;
+                // Request highlights per chunk (sequentially to respect basic rate limits)
+                foreach (var chunk in chunks)
+                {
+                    _logger.Log($"Analyzing chunk {chunkIndex}/{chunks.Count}...");
+                    var candidates = await GetHighlightsForChunkAsync(chunk, apiKey, count, minSeconds, maxSeconds, autoLength, transcript, ct);
+                    if (candidates.Count == 0)
+                    {
+                        emptyChunks++;
+                    }
+                    allCandidates.AddRange(candidates);
+                    chunkIndex++;
+                }
+
+                if (emptyChunks > 0)
+                {
+                    _logger.Log($"Groq: {emptyChunks} of {chunks.Count} chunks returned no clips");
+                }
+
+                if (CacheSourceKey != null && configKey != null && _failedChunks == 0 && allCandidates.Count > 0)
+                {
+                    ProjectStore.SaveHighlights(CacheSourceKey, configKey, count, GroqConfig.ModelId, allCandidates);
+                    _logger.Log("Saved AI picks for reuse");
+                }
             }
 
             // Return top unique results
@@ -172,6 +216,7 @@ namespace ClipStudio.Services
                         if (!response.IsSuccessStatusCode)
                         {
                             _logger.Log("Rate limit persisted; skipping chunk");
+                            _failedChunks++;
                             return new List<ClipCandidate>();
                         }
                     }
@@ -203,6 +248,7 @@ namespace ClipStudio.Services
                                     if (!response.IsSuccessStatusCode)
                                     {
                                         _logger.Log("Rate limit persisted on retry; skipping chunk");
+                                        _failedChunks++;
                                         return new List<ClipCandidate>();
                                     }
                                 }
@@ -213,6 +259,7 @@ namespace ClipStudio.Services
                                     if (retryIsJsonValidateFailed)
                                     {
                                         _logger.Log("Groq returned json_validate_failed on retry; skipping chunk");
+                                        _failedChunks++;
                                         return new List<ClipCandidate>();
                                     }
                                     throw new GroqApiException($"Configuration error on retry: {(int)response.StatusCode} - {retryTruncatedBody}");
@@ -226,10 +273,12 @@ namespace ClipStudio.Services
                                 else if ((int)response.StatusCode >= 500)
                                 {
                                     _logger.Log($"Server error {(int)response.StatusCode} from Groq API on retry. Skipping chunk.");
+                                    _failedChunks++;
                                     return new List<ClipCandidate>();
                                 }
                                 else
                                 {
+                                    _failedChunks++;
                                     return new List<ClipCandidate>();
                                 }
                             }
@@ -248,6 +297,7 @@ namespace ClipStudio.Services
                     else if ((int)response.StatusCode >= 500)
                     {
                         _logger.Log($"Server error {(int)response.StatusCode} from Groq API. Skipping chunk.");
+                        _failedChunks++;
                         return new List<ClipCandidate>();
                     }
                     else
@@ -266,6 +316,7 @@ namespace ClipStudio.Services
                 if (string.IsNullOrEmpty(contentString))
                 {
                     _logger.Log("Empty response from Groq API. Skipping chunk.");
+                    _failedChunks++;
                     return new List<ClipCandidate>();
                 }
 
@@ -282,6 +333,7 @@ namespace ClipStudio.Services
                 catch (JsonException)
                 {
                     _logger.Log("Malformed JSON from LLM; skipping chunk.");
+                    _failedChunks++;
                     return new List<ClipCandidate>();
                 }
 
@@ -415,6 +467,7 @@ namespace ClipStudio.Services
             catch (Exception ex)
             {
                 _logger.Log($"LLM AI Clip finding chunk failed: {ex.Message}. Skipping chunk.");
+                _failedChunks++;
                 return new List<ClipCandidate>();
             }
         }
