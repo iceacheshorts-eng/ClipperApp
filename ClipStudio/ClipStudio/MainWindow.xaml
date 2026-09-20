@@ -64,6 +64,8 @@
             <CheckBox Content="Remove filler words" IsChecked="{Binding RemoveFillerWordsEnabled}" Margin="0,0,16,0" VerticalAlignment="Center"/>
             <CheckBox Content="Burn-in captions" IsChecked="{Binding CaptionsEnabled}" Margin="0,0,16,0" VerticalAlignment="Center"/>
             <CheckBox Content="Use GPU for Transcription" IsChecked="{Binding UseGpuForTranscription}" Margin="0,0,16,0" VerticalAlignment="Center"/>
+            <CheckBox Content="Reuse saved transcripts" IsChecked="{Binding ReuseSavedData}" Margin="0,0,16,0" VerticalAlignment="Center"/>
+            <Button Content="Clear saved data" Command="{Binding ClearSavedDataCommand}" Margin="0,0,16,0" VerticalAlignment="Center" Padding="4" Height="24" Style="{StaticResource MaterialDesignFlatButton}"/>
             <ComboBox materialDesign:HintAssist.Hint="Caption style" ItemsSource="{Binding CaptionStyleOptions}" SelectedItem="{Binding SelectedCaptionStyle}" DisplayMemberPath="Name" IsEnabled="{Binding CaptionsEnabled}" Width="150" Margin="0,0,16,0"/>
             <!-- Trimming dead air removed based on user input -->
         </WrapPanel>
