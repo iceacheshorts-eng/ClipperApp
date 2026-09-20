@@ -52,15 +52,18 @@ namespace ClipStudio.Services
             var allCandidates = new List<ClipCandidate>();
 
             int emptyChunks = 0;
+            int chunkIndex = 1;
             // Request highlights per chunk (sequentially to respect basic rate limits)
             foreach (var chunk in chunks)
             {
+                _logger.Log($"Analyzing chunk {chunkIndex}/{chunks.Count}...");
                 var candidates = await GetHighlightsForChunkAsync(chunk, apiKey, count, minSeconds, maxSeconds, autoLength, transcript, ct);
                 if (candidates.Count == 0)
                 {
                     emptyChunks++;
                 }
                 allCandidates.AddRange(candidates);
+                chunkIndex++;
             }
 
             if (emptyChunks > 0)
@@ -117,7 +120,7 @@ namespace ClipStudio.Services
 
                 foreach (var seg in chunk)
                 {
-                    promptText.AppendLine($"[{seg.Index}] ({seg.Start.TotalSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s-{seg.End.TotalSeconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)}s) {seg.Text}");
+                    promptText.AppendLine($"[{seg.Index}] ({(int)Math.Round(seg.Start.TotalSeconds)}-{(int)Math.Round(seg.End.TotalSeconds)}s) {seg.Text}");
                 }
             }
             else
@@ -347,6 +350,29 @@ namespace ClipStudio.Services
 
                         actualEnd = newActualEnd.Value;
                         duration = (actualEnd - actualStart).TotalSeconds;
+                    }
+
+                    // Short-clip rescue
+                    if (autoLength && duration < AutoMinAcceptSeconds)
+                    {
+                        for (int i = h.EndSegment + 1; i <= maxIndex; i++)
+                        {
+                            var seg = fullTranscript[i];
+                            var newDuration = (seg.End - actualStart).TotalSeconds;
+                            if (newDuration > 60.0) break;
+
+                            var segText = seg.Text.TrimEnd();
+                            if (segText.EndsWith(".") || segText.EndsWith("!") || segText.EndsWith("?"))
+                            {
+                                if (newDuration >= 15.0)
+                                {
+                                    actualEnd = seg.End;
+                                    duration = newDuration;
+                                    _logger.Log($"Extended short clip to reach minimum duration.");
+                                    break;
+                                }
+                            }
+                        }
                     }
 
                     // Final duration check
