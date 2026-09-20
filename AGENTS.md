@@ -8,3 +8,4 @@
 - Never hardcode secrets. The Groq key comes from the GROQ_API_KEY env var.
 - In your final summary, paste `git diff --stat` and the lines implementing the task.
 - Do exploratory work only under /tmp. Before finishing, `git status --porcelain` must list only the files named in the task; paste its output in your summary.
+- If you come across minor/non-blocking flaws, try to fix the flaws and re-review your code after it's completed.
