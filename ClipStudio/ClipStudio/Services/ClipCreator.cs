@@ -33,7 +33,9 @@ namespace ClipStudio.Services
             List<TranscriptionService.CutSpan>? fillerWords,
             CancellationToken cancellationToken,
             IReadOnlyList<WordTiming>? words = null,
-            CaptionStyle? captionStyle = null)
+            CaptionStyle? captionStyle = null,
+            string encoderPreference = "Auto",
+            Action<string>? statusCallback = null)
         {
             if (!File.Exists(_ffmpegPath))
                 throw new FileNotFoundException($"ffmpeg.exe not found at {_ffmpegPath}");
@@ -119,8 +121,31 @@ namespace ClipStudio.Services
                 }
 
                 // STEP 2: Use OpenCvSharp to read the extracted video, apply smooth dynamic cropping frame-by-frame, and pipe to FFmpeg.
+
+                string targetEncoder = encoderPreference;
+                if (string.Equals(targetEncoder, "Auto", StringComparison.OrdinalIgnoreCase))
+                {
+                    targetEncoder = await VideoEncoders.GetAutoEncoderAsync(cancellationToken);
+                    _logger.Log($"Auto encoder resolved to: {targetEncoder}");
+                }
+
                 await Task.Run(() =>
                 {
+                    bool firstAttemptFailed = false;
+
+                    for (int attempt = 0; attempt < 2; attempt++)
+                    {
+                        if (attempt == 1)
+                        {
+                            if (!firstAttemptFailed || string.Equals(targetEncoder, "CPU", StringComparison.OrdinalIgnoreCase))
+                            {
+                                break;
+                            }
+                            targetEncoder = "CPU";
+                            _logger.Log($"Hardware encoding failed. Retrying with CPU (libx264) for {Path.GetFileName(outputFilePath)}...");
+                            statusCallback?.Invoke("Rendering... (HW encode failed, retrying on CPU)");
+                        }
+
                     using var capture = new OpenCvSharp.VideoCapture(tempFullVideoPath);
                     if (!capture.IsOpened()) throw new Exception("Could not open temp video for frame cropping.");
 
@@ -187,11 +212,52 @@ namespace ClipStudio.Services
                     }
 
                     pipeStartInfo.ArgumentList.Add("-c:v");
-                    pipeStartInfo.ArgumentList.Add("libx264");
-                    pipeStartInfo.ArgumentList.Add("-preset");
-                    pipeStartInfo.ArgumentList.Add("fast");
-                    pipeStartInfo.ArgumentList.Add("-crf");
-                    pipeStartInfo.ArgumentList.Add("23");
+
+                    if (string.Equals(targetEncoder, "NVENC", StringComparison.OrdinalIgnoreCase))
+                    {
+                        pipeStartInfo.ArgumentList.Add("h264_nvenc");
+                        pipeStartInfo.ArgumentList.Add("-preset");
+                        pipeStartInfo.ArgumentList.Add("p5");
+                        pipeStartInfo.ArgumentList.Add("-tune");
+                        pipeStartInfo.ArgumentList.Add("hq");
+                        pipeStartInfo.ArgumentList.Add("-rc");
+                        pipeStartInfo.ArgumentList.Add("vbr");
+                        pipeStartInfo.ArgumentList.Add("-cq");
+                        pipeStartInfo.ArgumentList.Add("23");
+                        pipeStartInfo.ArgumentList.Add("-b:v");
+                        pipeStartInfo.ArgumentList.Add("0");
+                    }
+                    else if (string.Equals(targetEncoder, "QSV", StringComparison.OrdinalIgnoreCase))
+                    {
+                        pipeStartInfo.ArgumentList.Add("h264_qsv");
+                        pipeStartInfo.ArgumentList.Add("-global_quality");
+                        pipeStartInfo.ArgumentList.Add("23");
+                        pipeStartInfo.ArgumentList.Add("-preset");
+                        pipeStartInfo.ArgumentList.Add("medium");
+                    }
+                    else if (string.Equals(targetEncoder, "AMF", StringComparison.OrdinalIgnoreCase))
+                    {
+                        pipeStartInfo.ArgumentList.Add("h264_amf");
+                        pipeStartInfo.ArgumentList.Add("-quality");
+                        pipeStartInfo.ArgumentList.Add("balanced");
+                        pipeStartInfo.ArgumentList.Add("-rc");
+                        pipeStartInfo.ArgumentList.Add("cqp");
+                        pipeStartInfo.ArgumentList.Add("-qp_i");
+                        pipeStartInfo.ArgumentList.Add("23");
+                        pipeStartInfo.ArgumentList.Add("-qp_p");
+                        pipeStartInfo.ArgumentList.Add("23");
+                        pipeStartInfo.ArgumentList.Add("-qp_b");
+                        pipeStartInfo.ArgumentList.Add("23");
+                    }
+                    else // CPU fallback (libx264)
+                    {
+                        pipeStartInfo.ArgumentList.Add("libx264");
+                        pipeStartInfo.ArgumentList.Add("-preset");
+                        pipeStartInfo.ArgumentList.Add("fast");
+                        pipeStartInfo.ArgumentList.Add("-crf");
+                        pipeStartInfo.ArgumentList.Add("23");
+                    }
+
                     pipeStartInfo.ArgumentList.Add("-pix_fmt");
                     pipeStartInfo.ArgumentList.Add("yuv420p");
                     pipeStartInfo.ArgumentList.Add("-movflags");
@@ -287,10 +353,20 @@ namespace ClipStudio.Services
                         if (process.ExitCode != 0)
                         {
                             string errorLog = errorLogTask.Result;
-                            throw new Exception($"ffmpeg piping failed with exit code {process.ExitCode}. Error: {errorLog}");
+                            if (attempt == 0 && !string.Equals(targetEncoder, "CPU", StringComparison.OrdinalIgnoreCase))
+                            {
+                                firstAttemptFailed = true;
+                                _logger.Log($"Warning: ffmpeg hardware piping failed with exit code {process.ExitCode}. Error: {errorLog}");
+                            }
+                            else
+                            {
+                                throw new Exception($"ffmpeg piping failed with exit code {process.ExitCode}. Error: {errorLog}");
+                            }
                         }
-
-                        succeeded = true;
+                        else
+                        {
+                            succeeded = true;
+                        }
                     }
                     finally
                     {
@@ -306,6 +382,9 @@ namespace ClipStudio.Services
                         }
                     }
 
+                    if (succeeded) break;
+
+                    } // End of retry loop
                 }, cancellationToken);
 
                 _logger.Log($"Advanced dynamic clip rendered successfully: {outputFilePath}");
