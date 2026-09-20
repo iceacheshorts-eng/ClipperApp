@@ -114,7 +114,10 @@
             </Grid>
         </GroupBox>
 
-        <TextBlock Text="Activity Log:" Grid.Row="4" Margin="0,0,0,4" FontWeight="Bold"/>
+        <Grid Grid.Row="4" Margin="0,0,0,4">
+            <TextBlock Text="Activity Log:" VerticalAlignment="Center" FontWeight="Bold"/>
+            <Button Content="Copy" Click="CopyLog_Click" HorizontalAlignment="Right" Style="{StaticResource MaterialDesignFlatButton}" Padding="4" Height="24" />
+        </Grid>
 
         <!-- Activity Log -->
         <ListBox x:Name="ActivityLogList" ItemsSource="{Binding Logger.Logs}" Grid.Row="5"
