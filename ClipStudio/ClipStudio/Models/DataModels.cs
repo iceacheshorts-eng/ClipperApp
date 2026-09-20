@@ -7,6 +7,8 @@ namespace ClipStudio.Models
 
     public class ClipCandidate
     {
+        public TimeSpan OriginalStartTime { get; set; }
+        public TimeSpan OriginalEndTime { get; set; }
         public TimeSpan StartTime { get; set; }
         public TimeSpan EndTime { get; set; }
         public double Duration => (EndTime - StartTime).TotalSeconds;
