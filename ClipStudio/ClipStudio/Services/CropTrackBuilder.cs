@@ -20,6 +20,7 @@ namespace ClipStudio.Services
         private const double DetectionStaleSeconds = 0.5;
         private const double StackedMinSeparation = 0.40;
         private const double LayoutDwellSeconds = 1.5;
+        private const double StackedExitDwellSeconds = 3.0;
         private const double MinLayoutHoldSeconds = 4.0;
 
         public class CropPoint
@@ -249,7 +250,8 @@ namespace ClipStudio.Services
                             pendingTimer = dt;
                         }
 
-                        if (pendingTimer >= LayoutDwellSeconds && timeSinceLayoutChange >= MinLayoutHoldSeconds)
+                        double dwellRequired = (activeLayout == CropLayout.Stacked && candidateLayout != CropLayout.Stacked) ? StackedExitDwellSeconds : LayoutDwellSeconds;
+                        if (pendingTimer >= dwellRequired && timeSinceLayoutChange >= MinLayoutHoldSeconds)
                         {
                             activeLayout = candidateLayout;
                             layoutSwitchedThisStep = true;

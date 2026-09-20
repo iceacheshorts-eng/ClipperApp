@@ -6,3 +6,7 @@
 *.DS_Store
 ClipStudio/ClipStudio/bin/
 ClipStudio/ClipStudio/obj/
+ClipStudio/ClipStudio/Binaries/
+ClipStudio/ClipStudio/Models/*.bin
+ClipStudio/ClipStudio/Models/*.caffemodel
+ClipStudio/ClipStudio/Models/*.prototxt

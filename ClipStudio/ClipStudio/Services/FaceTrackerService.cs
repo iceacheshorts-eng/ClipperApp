@@ -165,6 +165,7 @@ namespace ClipStudio.Services
                             if (capture.Set(VideoCaptureProperties.PosFrames, span.StartFrame))
                             {
                                 int landedFrame = (int)Math.Round(capture.Get(VideoCaptureProperties.PosFrames));
+                                if (landedFrame < 0) landedFrame = span.StartFrame;
                                 double diffSeconds = Math.Abs(span.StartFrame - landedFrame) / fps;
                                 if (diffSeconds > 1.0)
                                 {
