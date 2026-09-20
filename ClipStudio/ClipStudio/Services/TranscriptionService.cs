@@ -156,7 +156,10 @@ namespace ClipStudio.Services
                     {
                         if (!loggedEstimationWarning)
                         {
-                            _logger.Log("Word-level timestamps not honored; using estimated timings");
+                            if (wordLevelTimestamps)
+                            {
+                                _logger.Log("Word-level timestamps not honored; using estimated timings");
+                            }
                             loggedEstimationWarning = true;
                         }
 
@@ -243,7 +246,14 @@ namespace ClipStudio.Services
             }, ct);
 
             int estimatedCount = result.Words.Count(w => w.Estimated);
-            _logger.Log($"Transcription complete: {result.Words.Count} words ({estimatedCount} estimated), {result.Segments.Count} sentence segments.");
+            if (wordLevelTimestamps)
+            {
+                _logger.Log($"Transcription complete: {result.Words.Count} words ({estimatedCount} estimated), {result.Segments.Count} sentence segments.");
+            }
+            else
+            {
+                _logger.Log($"Transcription complete (phrase-level): {result.Words.Count} words, {result.Segments.Count} sentence segments.");
+            }
             return result;
         }
 
