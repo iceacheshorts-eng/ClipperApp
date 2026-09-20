@@ -525,6 +525,25 @@ namespace ClipStudio.ViewModels
         }
 
         [RelayCommand]
+        private async Task EditClipAsync(ClipCandidateViewModel? item)
+        {
+            if (item == null || _isRendering) return;
+
+            string sourceVideo = _downloadedFilePath ?? SourcePath;
+            if (!System.IO.File.Exists(sourceVideo))
+            {
+                Logger.Log("Source video not found; cannot edit.");
+                return;
+            }
+
+            var editorVm = new ClipEditorViewModel(item.GetClip(), sourceVideo, UseGpuForTranscription, Logger);
+            var editorWin = new ClipEditorWindow { Owner = System.Windows.Application.Current.MainWindow, DataContext = editorVm };
+            editorWin.ShowDialog();
+
+            item.RefreshFromClip();
+        }
+
+        [RelayCommand]
         private async Task ApproveAndRenderAsync()
         {
             _isRendering = true;
@@ -731,6 +750,8 @@ namespace ClipStudio.ViewModels
             OnPropertyChanged(nameof(Preview));
             OnPropertyChanged(nameof(HasReason));
             OnPropertyChanged(nameof(HasPreview));
+            OnPropertyChanged(nameof(HasEdits));
+            OnPropertyChanged(nameof(EditSummary));
         }
 
         public string DisplayText => $"[{_clip.StartTime:hh\\:mm\\:ss} - {_clip.EndTime:hh\\:mm\\:ss}] ({_clip.Duration:F1}s) Score: {_clip.Score:F2}";
@@ -755,6 +776,17 @@ namespace ClipStudio.ViewModels
 
         public bool HasReason => !string.IsNullOrWhiteSpace(Reason);
         public bool HasPreview => !string.IsNullOrWhiteSpace(Preview);
+
+        public bool HasEdits => _clip.DeletedRanges != null && _clip.DeletedRanges.Count > 0;
+
+        public string EditSummary
+        {
+            get {
+                int count = _clip.DeletedRanges?.Count ?? 0;
+                if (count == 0) return string.Empty;
+                return count == 1 ? "1 cut" : $"{count} cuts";
+            }
+        }
 
         public ClipCandidate GetClip() => _clip;
     }
