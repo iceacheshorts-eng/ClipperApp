@@ -525,7 +525,7 @@ namespace ClipStudio.ViewModels
         }
 
         [RelayCommand]
-        private async Task EditClipAsync(ClipCandidateViewModel? item)
+        private void EditClip(ClipCandidateViewModel? item)
         {
             if (item == null || _isRendering) return;
 
