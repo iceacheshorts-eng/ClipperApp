@@ -42,6 +42,9 @@ namespace ClipStudio.ViewModels
         [ObservableProperty]
         private bool _isAnchor;
 
+        [ObservableProperty]
+        private bool _isCurrent;
+
         public WordTiming OriginalTiming { get; init; } = null!;
     }
 
@@ -57,11 +60,21 @@ namespace ClipStudio.ViewModels
         private CancellationTokenSource? _cts;
 
         // Working states
+        [ObservableProperty]
         private TimeSpan _workingStart;
+
+        [ObservableProperty]
         private TimeSpan _workingEnd;
+
         private EditorWordItem? _rangeAnchor;
+        private EditorWordItem? _currentWord;
+
+        public Uri? SourceUri { get; }
+        public IReadOnlyList<TimeRange> PreviewCuts { get; private set; } = Array.Empty<TimeRange>();
 
         public event Action<bool>? CloseRequested;
+        public event Action? PreviewStateChanged;
+        public event Action<EditorWordItem?>? CurrentWordChanged;
 
         public ObservableCollection<EditorWordItem> Words { get; } = new();
 
@@ -107,6 +120,9 @@ namespace ClipStudio.ViewModels
         [ObservableProperty]
         private int _cutCount;
 
+        [ObservableProperty]
+        private string? _previewError;
+
         public ClipEditorViewModel(ClipCandidate clip, string sourceVideoPath, bool useGpu, IActivityLogger logger)
         {
             _clip = clip;
@@ -117,8 +133,10 @@ namespace ClipStudio.ViewModels
             _videoAnalyzer = new VideoAnalyzer(logger);
             _transcriptionService = new TranscriptionService(logger);
 
-            _workingStart = _clip.StartTime;
-            _workingEnd = _clip.EndTime;
+            SourceUri = System.IO.File.Exists(sourceVideoPath) ? new Uri(System.IO.Path.GetFullPath(sourceVideoPath)) : null;
+
+            WorkingStart = _clip.StartTime;
+            WorkingEnd = _clip.EndTime;
             OriginalDuration = (_clip.EndTime - _clip.StartTime).TotalSeconds;
 
             UpdateInfoText();
@@ -227,13 +245,14 @@ namespace ClipStudio.ViewModels
 
             RecomputeIsOutside();
             UpdateInfoText();
+            UpdatePreviewCuts();
         }
 
         private void RecomputeIsOutside()
         {
             foreach (var w in Words)
             {
-                w.IsOutside = w.End <= _workingStart || w.Start >= _workingEnd;
+                w.IsOutside = w.End <= WorkingStart || w.Start >= WorkingEnd;
             }
         }
 
@@ -243,9 +262,19 @@ namespace ClipStudio.ViewModels
                               .Select(w => new TimeRange(w.Start, w.End))
                               .ToList();
 
-            var normalized = ClipEditMath.NormalizeRanges(ranges, _workingStart, _workingEnd);
-            EditedDuration = ClipEditMath.KeptDuration(_workingStart, _workingEnd, normalized).TotalSeconds;
+            var normalized = ClipEditMath.NormalizeRanges(ranges, WorkingStart, WorkingEnd);
+            EditedDuration = ClipEditMath.KeptDuration(WorkingStart, WorkingEnd, normalized).TotalSeconds;
             CutCount = normalized.Count;
+        }
+
+        private void UpdatePreviewCuts()
+        {
+            var ranges = Words.Where(w => w.IsDeleted && !w.IsOutside)
+                              .Select(w => new TimeRange(w.Start, w.End))
+                              .ToList();
+
+            PreviewCuts = ClipEditMath.NormalizeRanges(ranges, WorkingStart, WorkingEnd);
+            PreviewStateChanged?.Invoke();
         }
 
         [RelayCommand]
@@ -258,6 +287,7 @@ namespace ClipStudio.ViewModels
                 if (word.IsOutside) return;
                 word.IsDeleted = !word.IsDeleted;
                 UpdateInfoText();
+                UpdatePreviewCuts();
                 StatusText = "Ready.";
             }
             else if (Mode == EditorMode.DeleteRange)
@@ -286,58 +316,61 @@ namespace ClipStudio.ViewModels
                     _rangeAnchor.IsAnchor = false;
                     _rangeAnchor = null;
                     UpdateInfoText();
+                    UpdatePreviewCuts();
                     StatusText = $"Deleted {count} words.";
                 }
             }
             else if (Mode == EditorMode.SetStart)
             {
-                if (word.Start >= _workingEnd)
+                if (word.Start >= WorkingEnd)
                 {
                     StatusText = "Start time must be before end time.";
                     return;
                 }
 
-                var oldStart = _workingStart;
-                _workingStart = word.Start;
+                var oldStart = WorkingStart;
+                WorkingStart = word.Start;
 
                 if (!ValidateDuration())
                 {
-                    _workingStart = oldStart;
+                    WorkingStart = oldStart;
                     StatusText = $"Clip must be between {ClipEditMath.MinClipSeconds}s and {ClipEditMath.MaxClipSeconds}s.";
                     return;
                 }
 
                 RecomputeIsOutside();
                 UpdateInfoText();
+                UpdatePreviewCuts();
                 StatusText = "Ready.";
             }
             else if (Mode == EditorMode.SetEnd)
             {
-                if (word.End <= _workingStart)
+                if (word.End <= WorkingStart)
                 {
                     StatusText = "End time must be after start time.";
                     return;
                 }
 
-                var oldEnd = _workingEnd;
-                _workingEnd = word.End;
+                var oldEnd = WorkingEnd;
+                WorkingEnd = word.End;
 
                 if (!ValidateDuration())
                 {
-                    _workingEnd = oldEnd;
+                    WorkingEnd = oldEnd;
                     StatusText = $"Clip must be between {ClipEditMath.MinClipSeconds}s and {ClipEditMath.MaxClipSeconds}s.";
                     return;
                 }
 
                 RecomputeIsOutside();
                 UpdateInfoText();
+                UpdatePreviewCuts();
                 StatusText = "Ready.";
             }
         }
 
         private bool ValidateDuration()
         {
-            var total = (_workingEnd - _workingStart).TotalSeconds;
+            var total = (WorkingEnd - WorkingStart).TotalSeconds;
 
             return total >= ClipEditMath.MinClipSeconds && total <= ClipEditMath.MaxClipSeconds;
         }
@@ -376,14 +409,15 @@ namespace ClipStudio.ViewModels
             }
 
             UpdateInfoText();
+            UpdatePreviewCuts();
             StatusText = $"Marked {count} filler words.";
         }
 
         [RelayCommand]
         private void Reset()
         {
-            _workingStart = _clip.StartTime;
-            _workingEnd = _clip.EndTime;
+            WorkingStart = _clip.StartTime;
+            WorkingEnd = _clip.EndTime;
             _rangeAnchor = null;
             Mode = EditorMode.DeleteWords;
             BuildWords();
@@ -397,11 +431,11 @@ namespace ClipStudio.ViewModels
                               .Select(w => new TimeRange(w.Start, w.End))
                               .ToList();
 
-            var normalized = ClipEditMath.NormalizeRanges(ranges, _workingStart, _workingEnd);
+            var normalized = ClipEditMath.NormalizeRanges(ranges, WorkingStart, WorkingEnd);
             var backupRanges = _clip.DeletedRanges;
             _clip.DeletedRanges = normalized;
 
-            if (!ClipEditMath.TrySetTrim(_clip, _workingStart, _workingEnd))
+            if (!ClipEditMath.TrySetTrim(_clip, WorkingStart, WorkingEnd))
             {
                 _clip.DeletedRanges = backupRanges;
                 StatusText = $"That trim is not allowed ({ClipEditMath.MinClipSeconds}-{ClipEditMath.MaxClipSeconds} s).";
@@ -425,6 +459,64 @@ namespace ClipStudio.ViewModels
         partial void OnIsLoadingChanged(bool value)
         {
             ApplyCommand.NotifyCanExecuteChanged();
+        }
+
+        partial void OnWorkingStartChanged(TimeSpan value)
+        {
+            PreviewStateChanged?.Invoke();
+        }
+
+        partial void OnWorkingEndChanged(TimeSpan value)
+        {
+            PreviewStateChanged?.Invoke();
+        }
+
+        public void UpdateCurrentWord(TimeSpan position)
+        {
+            if (Words.Count == 0) return;
+
+            int left = 0;
+            int right = Words.Count - 1;
+            EditorWordItem? found = null;
+
+            while (left <= right)
+            {
+                int mid = left + (right - left) / 2;
+                var w = Words[mid];
+
+                if (position >= w.Start && position < w.End)
+                {
+                    if (!w.IsOutside)
+                    {
+                        found = w;
+                    }
+                    break;
+                }
+
+                if (position < w.Start)
+                {
+                    right = mid - 1;
+                }
+                else
+                {
+                    left = mid + 1;
+                }
+            }
+
+            if (found == _currentWord) return;
+
+            if (_currentWord != null)
+            {
+                _currentWord.IsCurrent = false;
+            }
+
+            if (found != null)
+            {
+                found.IsCurrent = true;
+            }
+
+            _currentWord = found;
+            CurrentWordChanged?.Invoke(_currentWord);
         }
     }
 }
