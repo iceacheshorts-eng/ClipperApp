@@ -56,26 +56,30 @@ namespace ClipStudio.Services
             startInfo.ArgumentList.Add("--ffmpeg-location");
             startInfo.ArgumentList.Add(Path.Combine(AppContext.BaseDirectory, "Binaries"));
             startInfo.ArgumentList.Add("--");
-            startInfo.ArgumentList.Add(url);
+            startInfo.ArgumentList.Add(url.Trim());
 
             string? finalFilePath = null;
             Regex progressRegex = new Regex(@"\[download\]\s+(?<percent>\d+\.\d)%");
             var recentLines = new Queue<string>();
+            var recentLinesLock = new object();
 
             _logger.Log($"Starting yt-dlp with arguments: {string.Join(" ", startInfo.ArgumentList)}");
 
             int exitCode = await ProcessUtils.RunProcessAsync(startInfo, line =>
             {
-                recentLines.Enqueue(line);
-                if (recentLines.Count > 10)
+                lock (recentLinesLock)
                 {
-                    recentLines.Dequeue();
+                    recentLines.Enqueue(line);
+                    if (recentLines.Count > 10)
+                    {
+                        recentLines.Dequeue();
+                    }
                 }
 
                 var progressMatch = progressRegex.Match(line);
                 if (progressMatch.Success)
                 {
-                    if (double.TryParse(progressMatch.Groups["percent"].Value, out double percent))
+                    if (double.TryParse(progressMatch.Groups["percent"].Value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out double percent))
                     {
                         progress.Report((int)percent);
                     }
@@ -90,12 +94,22 @@ namespace ClipStudio.Services
 
             if (exitCode != 0)
             {
-                throw new Exception($"yt-dlp failed with exit code {exitCode}. Last output:\n{string.Join("\n", recentLines)}");
+                string recentLinesStr;
+                lock (recentLinesLock)
+                {
+                    recentLinesStr = string.Join("\n", recentLines);
+                }
+                throw new Exception($"yt-dlp failed with exit code {exitCode}. Last output:\n{recentLinesStr}");
             }
 
             if (string.IsNullOrEmpty(finalFilePath) || !File.Exists(finalFilePath))
             {
-                throw new InvalidOperationException($"yt-dlp finished but reported no output file. Last output:\n{string.Join("\n", recentLines)}");
+                string recentLinesStr;
+                lock (recentLinesLock)
+                {
+                    recentLinesStr = string.Join("\n", recentLines);
+                }
+                throw new InvalidOperationException($"yt-dlp finished but reported no output file. Last output:\n{recentLinesStr}");
             }
 
             return finalFilePath;

@@ -25,7 +25,7 @@ namespace ClipStudio.Services
             _modelPath = Path.Combine(AppContext.BaseDirectory, "Models", "ggml-base.en.bin");
         }
 
-        public async Task<List<TranscriptSegment>> TranscribeAsync(string wavPath, CancellationToken cancellationToken)
+        public async Task<TranscriptionResult> TranscribeAsync(string wavPath, bool useFillerPrompt, CancellationToken ct)
         {
             if (!File.Exists(_modelPath))
             {
@@ -34,121 +34,187 @@ namespace ClipStudio.Services
             }
 
             _logger.Log("Transcribing audio...");
-            var segments = new List<TranscriptSegment>();
+            var result = new TranscriptionResult();
 
             await Task.Run(async () =>
             {
                 using var whisperFactory = WhisperFactory.FromPath(_modelPath);
-                using var processor = whisperFactory.CreateBuilder()
+                var builder = whisperFactory.CreateBuilder()
                     .WithLanguage("en")
-                    .Build();
+                    .WithTokenTimestamps()
+                    .WithMaxSegmentLength(1)
+                    .SplitOnWord();
 
-                using var fileStream = File.OpenRead(wavPath);
-
-                var currentText = new System.Text.StringBuilder();
-                TimeSpan currentStart = TimeSpan.Zero;
-                TimeSpan currentEnd = TimeSpan.Zero;
-                int wordCount = 0;
-                int segmentIndex = 0;
-                bool isFirstInGroup = true;
-
-                await foreach (var segment in processor.ProcessAsync(fileStream, cancellationToken))
+                if (useFillerPrompt)
                 {
-                    if (isFirstInGroup)
-                    {
-                        currentStart = segment.Start;
-                        isFirstInGroup = false;
-                    }
-
-                    currentText.Append(segment.Text);
-                    currentEnd = segment.End;
-
-                    var trimmedText = segment.Text.Trim();
-                    int segmentWordCount = trimmedText.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries).Length;
-                    wordCount += segmentWordCount;
-
-                    bool endsWithPunctuation = trimmedText.EndsWith(".") || trimmedText.EndsWith("?") || trimmedText.EndsWith("!");
-                    bool isTooLong = (currentEnd - currentStart).TotalSeconds > 15;
-                    bool hasTooManyWords = wordCount > 40;
-
-                    if (endsWithPunctuation || isTooLong || hasTooManyWords)
-                    {
-                        segments.Add(new TranscriptSegment(
-                            segmentIndex++,
-                            currentStart,
-                            currentEnd,
-                            currentText.ToString().Trim()
-                        ));
-
-                        currentText.Clear();
-                        wordCount = 0;
-                        isFirstInGroup = true;
-                    }
+                    builder.WithPrompt("Umm, let me think like, hmm... Okay, here's what I'm, like, thinking.");
                 }
 
-                if (currentText.Length > 0)
-                {
-                    segments.Add(new TranscriptSegment(
-                        segmentIndex++,
-                        currentStart,
-                        currentEnd,
-                        currentText.ToString().Trim()
-                    ));
-                }
-            }, cancellationToken);
-
-            _logger.Log($"Transcription complete. Created {segments.Count} sentence segments.");
-            return segments;
-        }
-
-        public async Task<List<CutSpan>> DetectFillerWordsAsync(string wavPath, CancellationToken cancellationToken)
-        {
-            var cutSpans = new List<CutSpan>();
-
-            if (!File.Exists(_modelPath))
-            {
-                _logger.Log($"AI model missing at {_modelPath}. Skipping Filler Word detection.");
-                throw new FileNotFoundException("Whisper model not found.");
-            }
-
-            _logger.Log("Detecting filler words...");
-
-            var fillerWords = new HashSet<string> { "um", "uh", "erm", "hmm", " um", " uh", " erm", " hmm" };
-
-            await Task.Run(async () =>
-            {
-                using var whisperFactory = WhisperFactory.FromPath(_modelPath);
-                using var processor = whisperFactory.CreateBuilder()
-                    .WithLanguage("en")
-                    .Build(); // Note: Word-level timestamps require specific Whisper.net configurations/models sometimes, but we simulate standard usage here.
-
+                using var processor = builder.Build();
                 using var fileStream = File.OpenRead(wavPath);
 
-                await foreach (var segment in processor.ProcessAsync(fileStream, cancellationToken))
+                var rawWords = new List<WordTiming>();
+                bool loggedEstimationWarning = false;
+
+                await foreach (var segment in processor.ProcessAsync(fileStream, ct))
                 {
-                    // Whisper.net typically outputs segment level unless word_timestamps are heavily configured.
-                    // To extract filler words effectively without full token level access easily,
-                    // we analyze the segment text and roughly split timestamps if it contains a filler.
+                    var text = segment.Text.Trim();
+                    if (string.IsNullOrEmpty(text)) continue;
 
-                    var cleanText = segment.Text.ToLower().Replace(".", "").Replace(",", "").Replace("?", "").Trim();
-                    var words = cleanText.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-                    if (words.Length == 0) continue;
-
-                    double segmentDuration = (segment.End - segment.Start).TotalSeconds;
-                    double wordDuration = segmentDuration / words.Length; // Rough approximation for time-slicing
-
-                    for (int i = 0; i < words.Length; i++)
+                    if ((text.StartsWith("[") && text.EndsWith("]")) ||
+                        (text.StartsWith("(") && text.EndsWith(")")) ||
+                        text.Contains("\u266A") || text.Contains("\u266B")) // Music notes
                     {
-                        if (fillerWords.Contains(words[i]))
+                        continue;
+                    }
+
+                    var tokens = text.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    if (tokens.Length == 1)
+                    {
+                        rawWords.Add(new WordTiming(tokens[0], segment.Start, segment.End, false));
+                    }
+                    else if (tokens.Length > 1)
+                    {
+                        if (!loggedEstimationWarning)
                         {
-                            var wordStart = segment.Start.Add(TimeSpan.FromSeconds(i * wordDuration));
-                            var wordEnd = wordStart.Add(TimeSpan.FromSeconds(wordDuration));
-                            cutSpans.Add(new CutSpan { Start = wordStart, End = wordEnd });
+                            _logger.Log("Word-level timestamps not honored; using estimated timings");
+                            loggedEstimationWarning = true;
+                        }
+
+                        double segmentDuration = (segment.End - segment.Start).TotalSeconds;
+                        double tokenDuration = segmentDuration / tokens.Length;
+
+                        for (int i = 0; i < tokens.Length; i++)
+                        {
+                            var wordStart = segment.Start.Add(TimeSpan.FromSeconds(i * tokenDuration));
+                            var wordEnd = wordStart.Add(TimeSpan.FromSeconds(tokenDuration));
+                            rawWords.Add(new WordTiming(tokens[i], wordStart, wordEnd, true));
                         }
                     }
                 }
-            }, cancellationToken);
+
+                // Normalize the word list
+                var normalizedWords = new List<WordTiming>();
+                TimeSpan previousEnd = TimeSpan.Zero;
+                foreach (var w in rawWords)
+                {
+                    var start = w.Start;
+                    var end = w.End;
+
+                    if (start < previousEnd)
+                    {
+                        start = previousEnd;
+                    }
+
+                    if (start > end)
+                    {
+                        start = end;
+                    }
+
+                    var normalized = new WordTiming(w.Text, start, end, w.Estimated);
+                    normalizedWords.Add(normalized);
+                    result.Words.Add(normalized);
+
+                    previousEnd = end;
+                }
+
+                // Build sentence segments from the words
+                var currentWords = new List<string>();
+                TimeSpan currentStart = TimeSpan.Zero;
+                TimeSpan currentEnd = TimeSpan.Zero;
+                int segmentIndex = 0;
+
+                foreach (var word in normalizedWords)
+                {
+                    if (currentWords.Count == 0)
+                    {
+                        currentStart = word.Start;
+                    }
+
+                    currentWords.Add(word.Text);
+                    currentEnd = word.End;
+
+                    var cleanText = word.Text.TrimEnd('\"', '\'', ']', ')', '}', '>');
+                    bool endsWithPunctuation = cleanText.EndsWith(".") || cleanText.EndsWith("?") || cleanText.EndsWith("!");
+                    bool isTooLong = (currentEnd - currentStart).TotalSeconds > 15;
+                    bool hasTooManyWords = currentWords.Count > 40;
+
+                    if (endsWithPunctuation || isTooLong || hasTooManyWords)
+                    {
+                        result.Segments.Add(new TranscriptSegment(
+                            segmentIndex++,
+                            currentStart,
+                            currentEnd,
+                            string.Join(" ", currentWords)
+                        ));
+
+                        currentWords.Clear();
+                    }
+                }
+
+                if (currentWords.Count > 0)
+                {
+                    result.Segments.Add(new TranscriptSegment(
+                        segmentIndex++,
+                        currentStart,
+                        currentEnd,
+                        string.Join(" ", currentWords)
+                    ));
+                }
+            }, ct);
+
+            int estimatedCount = result.Words.Count(w => w.Estimated);
+            _logger.Log($"Transcription complete: {result.Words.Count} words ({estimatedCount} estimated), {result.Segments.Count} sentence segments.");
+            return result;
+        }
+
+        public List<CutSpan> DetectFillerSpans(IReadOnlyList<WordTiming> words)
+        {
+            var cutSpans = new List<CutSpan>();
+            var fillerWords = new HashSet<string> { "um", "umm", "uh", "uhh", "uhm", "erm", "er", "hmm", "hm" };
+            int skippedEstimated = 0;
+
+            foreach (var word in words)
+            {
+                if (word.Estimated)
+                {
+                    skippedEstimated++;
+                    continue;
+                }
+
+                double duration = (word.End - word.Start).TotalSeconds;
+                if (duration <= 0 || duration > 2.0)
+                {
+                    continue;
+                }
+
+                // trim non-letter/digit/apostrophe characters from both ends
+                int startIdx = 0;
+                while (startIdx < word.Text.Length && !char.IsLetterOrDigit(word.Text[startIdx]) && word.Text[startIdx] != '\'')
+                {
+                    startIdx++;
+                }
+
+                int endIdx = word.Text.Length - 1;
+                while (endIdx >= startIdx && !char.IsLetterOrDigit(word.Text[endIdx]) && word.Text[endIdx] != '\'')
+                {
+                    endIdx--;
+                }
+
+                if (startIdx <= endIdx)
+                {
+                    string cleanText = word.Text.Substring(startIdx, endIdx - startIdx + 1).ToLower();
+                    if (fillerWords.Contains(cleanText))
+                    {
+                        cutSpans.Add(new CutSpan { Start = word.Start, End = word.End });
+                    }
+                }
+            }
+
+            if (skippedEstimated > 0)
+            {
+                _logger.Log($"Skipped {skippedEstimated} estimated words during filler detection.");
+            }
 
             // Merge adjacent spans within 0.25s
             var merged = new List<CutSpan>();
