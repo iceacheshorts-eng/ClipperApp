@@ -35,6 +35,7 @@ namespace ClipStudio
         private DispatcherTimer _timer;
         private DateTime _lastSeekCutTime = DateTime.MinValue;
         private bool _isPlaying = false;
+        private bool _mediaReady = false;
         private ClipEditorViewModel? _vm;
 
         public ClipEditorWindow()
@@ -72,6 +73,7 @@ namespace ClipStudio
         private void Window_Closing(object sender, CancelEventArgs e)
         {
             _timer.Stop();
+            _mediaReady = false;
             Player.Stop();
             Player.Close();
             Player.Source = null;
@@ -95,10 +97,13 @@ namespace ClipStudio
             SeekSlider.Minimum = _vm.WorkingStart.TotalSeconds;
             SeekSlider.Maximum = _vm.WorkingEnd.TotalSeconds;
 
-            if (Player.Position < _vm.WorkingStart || Player.Position >= _vm.WorkingEnd)
+            if (_mediaReady)
             {
-                SafeSeek(_vm.WorkingStart);
-                PausePlayback();
+                if (Player.Position < _vm.WorkingStart || Player.Position >= _vm.WorkingEnd)
+                {
+                    SafeSeek(_vm.WorkingStart);
+                    PausePlayback();
+                }
             }
 
             DrawGuide();
@@ -116,6 +121,7 @@ namespace ClipStudio
 
         private void Player_MediaOpened(object sender, RoutedEventArgs e)
         {
+            _mediaReady = true;
             if (_vm == null) return;
 
             SafeSeek(_vm.WorkingStart);
@@ -129,6 +135,7 @@ namespace ClipStudio
 
         private void Player_MediaFailed(object sender, ExceptionRoutedEventArgs e)
         {
+            _mediaReady = false;
             if (_vm != null)
             {
                 _vm.PreviewError = "Preview is not available for this video format; editing still works.";
@@ -229,6 +236,7 @@ namespace ClipStudio
 
         private void SafeSeek(TimeSpan position)
         {
+            if (!_mediaReady) return;
             try
             {
                 Player.Position = position;
