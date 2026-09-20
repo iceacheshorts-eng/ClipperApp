@@ -67,11 +67,15 @@ namespace ClipStudio.ViewModels
         private List<TranscriptionService.CutSpan>? _fillerWords;
         private bool _isRendering = false;
 
-        private const string DefaultOutputFolderName = "output";
+        private const string DefaultOutputFolderName = "ClipStudio";
+        private const string FallbackOutputFolderName = "output";
 
         private static string GetDefaultOutputFolder()
         {
-            return System.IO.Path.Combine(AppContext.BaseDirectory, DefaultOutputFolderName);
+            string videos = Environment.GetFolderPath(Environment.SpecialFolder.MyVideos);
+            return string.IsNullOrWhiteSpace(videos)
+                ? System.IO.Path.Combine(AppContext.BaseDirectory, FallbackOutputFolderName)
+                : System.IO.Path.Combine(videos, DefaultOutputFolderName);
         }
 
         private bool TryEnsureFolder(string path)

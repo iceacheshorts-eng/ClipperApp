@@ -7,4 +7,4 @@
 - If you edit the same file twice for the same error, stop and report the blocker.
 - Never hardcode secrets. The Groq key comes from the GROQ_API_KEY env var.
 - In your final summary, paste `git diff --stat` and the lines implementing the task.
-- Never commit scratch or helper files (patches, temp scripts). Only files listed in the approved plan may change.
+- Do exploratory work only under /tmp. Before finishing, `git status --porcelain` must list only the files named in the task; paste its output in your summary.
