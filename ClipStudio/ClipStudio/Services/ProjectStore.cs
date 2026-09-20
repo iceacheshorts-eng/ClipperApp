@@ -84,6 +84,112 @@ namespace ClipStudio.Services
             return null;
         }
 
+        public static string TranscriptFingerprint(System.Collections.Generic.IReadOnlyList<TranscriptSegment> transcript)
+        {
+            try
+            {
+                var sb = new StringBuilder();
+                foreach (var seg in transcript)
+                {
+                    sb.Append($"{seg.Index}|{seg.Start.Ticks}|{seg.End.Ticks}|{seg.Text}\n");
+                }
+
+                using (var sha256 = SHA256.Create())
+                {
+                    byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+                    string hashHex = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+                    return hashHex.Substring(0, 16);
+                }
+            }
+            catch
+            {
+                return "";
+            }
+        }
+
+        public static HighlightsCacheFile? TryLoadHighlights(string sourceKey, string configKey)
+        {
+            try
+            {
+                string hashHex;
+                using (var sha256 = SHA256.Create())
+                {
+                    byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(configKey));
+                    hashHex = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+                }
+                string configPrefix = hashHex.Substring(0, 12);
+
+                string dirPath = Path.Combine(GetProjectsRoot(), sourceKey);
+                string filePath = Path.Combine(dirPath, $"highlights_{configPrefix}.json");
+
+                if (!File.Exists(filePath))
+                {
+                    return null;
+                }
+
+                string json = File.ReadAllText(filePath);
+                var cacheFile = JsonSerializer.Deserialize<HighlightsCacheFile>(json);
+
+                if (cacheFile == null) return null;
+
+                if (cacheFile.SchemaVersion == SchemaVersion &&
+                    cacheFile.ConfigKey == configKey)
+                {
+                    return cacheFile;
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        public static void SaveHighlights(string sourceKey, string configKey, int perChunkCount, string modelId, System.Collections.Generic.IEnumerable<ClipCandidate> clips)
+        {
+            try
+            {
+                string hashHex;
+                using (var sha256 = SHA256.Create())
+                {
+                    byte[] hashBytes = sha256.ComputeHash(Encoding.UTF8.GetBytes(configKey));
+                    hashHex = BitConverter.ToString(hashBytes).Replace("-", "").ToLowerInvariant();
+                }
+                string configPrefix = hashHex.Substring(0, 12);
+
+                string dirPath = Path.Combine(GetProjectsRoot(), sourceKey);
+                Directory.CreateDirectory(dirPath);
+
+                string filePath = Path.Combine(dirPath, $"highlights_{configPrefix}.json");
+                string tmpPath = filePath + ".tmp";
+
+                var cacheFile = new HighlightsCacheFile
+                {
+                    SchemaVersion = SchemaVersion,
+                    SourceKey = sourceKey,
+                    ConfigKey = configKey,
+                    PerChunkCount = perChunkCount,
+                    ModelId = modelId,
+                    SavedUtc = DateTime.UtcNow,
+                    Clips = clips.Select(c => new SavedClip
+                    {
+                        Start = c.StartTime,
+                        End = c.EndTime,
+                        Score = c.Score,
+                        Reason = c.Reason,
+                        Transcript = c.Transcript
+                    }).ToList()
+                };
+
+                string json = JsonSerializer.Serialize(cacheFile);
+                File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, filePath, true);
+            }
+            catch
+            {
+            }
+        }
+
         public static void SaveTranscript(string sourceKey, string modelFileName, long modelFileSize, bool fillerPrompt, bool wordLevel, TranscriptionResult result)
         {
             try

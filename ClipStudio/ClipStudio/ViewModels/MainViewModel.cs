@@ -394,6 +394,9 @@ namespace ClipStudio.ViewModels
                             Logger.Log("AI Automated Clip mode is OFF.");
                         }
 
+                        aiService.CacheSourceKey = sourceKey;
+                        aiService.ReuseSavedPicks = ReuseSavedData;
+
                         aiCandidates = await aiService.GetHighlightsAsync(transcription.Segments, ClipCount, 15.0, ClipLengthMultiplier, AutoClipEnabled, token);
 
                         if (aiCandidates == null || aiCandidates.Count == 0)
