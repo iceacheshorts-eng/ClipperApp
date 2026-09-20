@@ -48,7 +48,7 @@ namespace ClipStudio.Services
             }
 
             // Chunk transcripts if they are extremely long to avoid LLM context / output issues
-            var chunks = ChunkTranscript(transcript, maxSentences: 150);
+            var chunks = ChunkTranscript(transcript, maxSentences: 80);
             var allCandidates = new List<ClipCandidate>();
 
             // Request highlights per chunk (sequentially to respect basic rate limits)
@@ -130,6 +130,7 @@ namespace ClipStudio.Services
             var payload = new
             {
                 model = GroqConfig.ModelId,
+                max_tokens = 2048,
                 messages = new[]
                 {
                     new { role = "user", content = promptText.ToString() }
