@@ -10,6 +10,9 @@ namespace ClipStudio.Services
 {
     public class TranscriptionService
     {
+        private const string FillerPrompt = "Umm, let me think like, hmm... Okay, here's what I'm, like, thinking.";
+        private const int MaxAnnotationTokens = 6;
+
         private readonly IActivityLogger _logger;
         private readonly string _modelPath;
 
@@ -23,6 +26,38 @@ namespace ClipStudio.Services
         {
             _logger = logger;
             _modelPath = Path.Combine(AppContext.BaseDirectory, "Models", "ggml-base.en.bin");
+        }
+
+        private static bool IsAnnotationToken(string token, ref bool inAnnotation, ref int annotationTokenCount, out bool guardTripped)
+        {
+            guardTripped = false;
+            string trimmedEnd = token.TrimEnd('.', ',', '!', '?', ':', ';');
+            bool closes = trimmedEnd.EndsWith("]") || trimmedEnd.EndsWith(")");
+
+            if (inAnnotation)
+            {
+                annotationTokenCount++;
+                if (annotationTokenCount > MaxAnnotationTokens)
+                {
+                    inAnnotation = false;
+                    annotationTokenCount = 0;
+                    guardTripped = true;
+                    return false;               // treat this token as a normal word
+                }
+                if (closes) { inAnnotation = false; annotationTokenCount = 0; }
+                return true;
+            }
+
+            if (token.StartsWith("[") || token.StartsWith("("))
+            {
+                if (!closes) { inAnnotation = true; annotationTokenCount = 0; }
+                return true;                    // "(laughs)" is skipped in one step
+            }
+
+            if (token.Contains("\u266A") || token.Contains("\u266B") || token.Contains("\u266C") || token.Contains("\u2669"))
+                return true;
+
+            return false;
         }
 
         public async Task<TranscriptionResult> TranscribeAsync(string wavPath, bool useFillerPrompt, CancellationToken ct)
@@ -47,7 +82,7 @@ namespace ClipStudio.Services
 
                 if (useFillerPrompt)
                 {
-                    builder.WithPrompt("Umm, let me think like, hmm... Okay, here's what I'm, like, thinking.");
+                    builder.WithPrompt(FillerPrompt);
                 }
 
                 using var processor = builder.Build();
@@ -56,19 +91,37 @@ namespace ClipStudio.Services
                 var rawWords = new List<WordTiming>();
                 bool loggedEstimationWarning = false;
 
+                bool inAnnotation = false;
+                int annotationTokenCount = 0;
+                bool loggedGuardWarning = false;
+
                 await foreach (var segment in processor.ProcessAsync(fileStream, ct))
                 {
                     var text = segment.Text.Trim();
                     if (string.IsNullOrEmpty(text)) continue;
 
-                    if ((text.StartsWith("[") && text.EndsWith("]")) ||
-                        (text.StartsWith("(") && text.EndsWith(")")) ||
-                        text.Contains("\u266A") || text.Contains("\u266B")) // Music notes
+                    var rawTokens = text.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    var keptTokens = new List<string>();
+
+                    foreach (var token in rawTokens)
                     {
-                        continue;
+                        bool isAnnotation = IsAnnotationToken(token, ref inAnnotation, ref annotationTokenCount, out bool guardTripped);
+
+                        if (guardTripped && !loggedGuardWarning)
+                        {
+                            _logger.Log("Annotation guard: stray bracket ignored");
+                            loggedGuardWarning = true;
+                        }
+
+                        if (!isAnnotation)
+                        {
+                            keptTokens.Add(token);
+                        }
                     }
 
-                    var tokens = text.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                    var tokens = keptTokens.ToArray();
+                    if (tokens.Length == 0) continue;
+
                     if (tokens.Length == 1)
                     {
                         rawWords.Add(new WordTiming(tokens[0], segment.Start, segment.End, false));

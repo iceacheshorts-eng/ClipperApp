@@ -200,15 +200,28 @@ namespace ClipStudio.ViewModels
                 Logger.Log($"No output folder selected; using default: {OutputFolder}");
             }
 
+            try
+            {
+                OutputFolder = System.IO.Path.GetFullPath(OutputFolder.Trim());
+                SourcePath = SourcePath.Trim();
+                if (!SourcePath.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                {
+                    SourcePath = System.IO.Path.GetFullPath(SourcePath);
+                }
+            }
+            catch (Exception ex) when (ex is ArgumentException || ex is NotSupportedException || ex is System.IO.PathTooLongException)
+            {
+                Logger.Log($"Invalid path: {ex.Message}");
+                return;
+            }
+
             if (!TryEnsureFolder(OutputFolder))
             {
                 return;
             }
 
-            SourcePath = SourcePath.Trim();
             if (!SourcePath.StartsWith("http", StringComparison.OrdinalIgnoreCase))
             {
-                SourcePath = System.IO.Path.GetFullPath(SourcePath);
                 if (!System.IO.File.Exists(SourcePath))
                 {
                     Logger.Log($"Source file not found: {SourcePath}");
