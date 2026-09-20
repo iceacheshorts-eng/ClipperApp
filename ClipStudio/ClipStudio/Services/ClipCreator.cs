@@ -31,7 +31,9 @@ namespace ClipStudio.Services
             ClipCandidate clip,
             List<CropTrackBuilder.CropPoint> cropTrack,
             List<TranscriptionService.CutSpan>? fillerWords,
-            CancellationToken cancellationToken)
+            CancellationToken cancellationToken,
+            IReadOnlyList<WordTiming>? words = null,
+            CaptionStyle? captionStyle = null)
         {
             if (!File.Exists(_ffmpegPath))
                 throw new FileNotFoundException($"ffmpeg.exe not found at {_ffmpegPath}");
@@ -42,6 +44,7 @@ namespace ClipStudio.Services
 
             // Temporary files for the 2-step process
             string tempFullVideoPath = TempPaths.NewTempFile(".mp4");
+            string? tempAssPath = null;
 
             try
             {
@@ -75,6 +78,45 @@ namespace ClipStudio.Services
 
                 int extractExitCode = await ProcessUtils.RunProcessAsync(extractStartInfo, _ => {}, cancellationToken);
                 if (extractExitCode != 0) throw new Exception($"ffmpeg extraction failed with exit code {extractExitCode}");
+
+                // Pre-calculate captions and filter strings outside Task.Run
+                List<(double Start, double End)>? clipKeepSpans = null;
+                var clipFillers = fillerWords?
+                    .Where(f => f.Start < clip.EndTime && f.End > clip.StartTime)
+                    .ToList();
+
+                if (clipFillers != null && clipFillers.Any())
+                {
+                    clipKeepSpans = BuildKeepSpans(clip, clipFillers);
+                }
+
+                string assFilterString = "";
+                if (words != null && captionStyle != null)
+                {
+                    bool hasAss = await FfmpegCapabilities.HasFilterAsync(_ffmpegPath, "ass", cancellationToken);
+                    if (hasAss)
+                    {
+                        var mappedWords = CaptionAssBuilder.MapWordsToOutputTimeline(words, clip.StartTime.TotalSeconds, clip.EndTime.TotalSeconds, clipKeepSpans);
+                        if (mappedWords.Count > 0)
+                        {
+                            tempAssPath = TempPaths.NewTempFile(".ass");
+                            string assContent = CaptionAssBuilder.Build(mappedWords, captionStyle, CropMath.OutputWidth, CropMath.OutputHeight);
+                            await File.WriteAllTextAsync(tempAssPath, assContent, new UTF8Encoding(false), cancellationToken);
+
+                            string assFileName = Path.GetFileName(tempAssPath);
+                            string systemFontsDir = Environment.GetFolderPath(Environment.SpecialFolder.Fonts).Replace('\\', '/').Replace(":", "\\:");
+                            assFilterString = $",ass=filename={assFileName}:fontsdir='{systemFontsDir}'";
+                        }
+                        else
+                        {
+                            _logger.Log("Captions skipped: no words map to the output timeline.");
+                        }
+                    }
+                    else
+                    {
+                        _logger.Log("Captions skipped: ffmpeg 'ass' filter is not available.");
+                    }
+                }
 
                 // STEP 2: Use OpenCvSharp to read the extracted video, apply smooth dynamic cropping frame-by-frame, and pipe to FFmpeg.
                 await Task.Run(() =>
@@ -122,29 +164,22 @@ namespace ClipStudio.Services
                     pipeStartInfo.ArgumentList.Add(tempFullVideoPath);
 
                     bool hasFilterComplex = false;
-                    if (fillerWords != null && fillerWords.Any())
+                    if (clipKeepSpans != null && clipFillers != null && clipFillers.Any())
                     {
-                        var clipFillers = fillerWords
-                            .Where(f => f.Start < clip.EndTime && f.End > clip.StartTime)
-                            .ToList();
-
-                        if (clipFillers.Any())
-                        {
-                            var selectExpr = BuildSelectExpression(clip, clipFillers);
-                            pipeStartInfo.ArgumentList.Add("-filter_complex");
-                            pipeStartInfo.ArgumentList.Add($"[0:v]select='{selectExpr}',setpts=N/FRAME_RATE/TB,scale=1080:1920:flags=lanczos,format=yuv420p[vout];[1:a]aselect='{selectExpr}',asetpts=N/SR/TB[aout]");
-                            pipeStartInfo.ArgumentList.Add("-map");
-                            pipeStartInfo.ArgumentList.Add("[vout]");
-                            pipeStartInfo.ArgumentList.Add("-map");
-                            pipeStartInfo.ArgumentList.Add("[aout]");
-                            hasFilterComplex = true;
-                        }
+                        var selectExpr = BuildSelectExpression(clip, clipKeepSpans);
+                        pipeStartInfo.ArgumentList.Add("-filter_complex");
+                        pipeStartInfo.ArgumentList.Add($"[0:v]select='{selectExpr}',setpts=N/FRAME_RATE/TB,scale=1080:1920:flags=lanczos,format=yuv420p{assFilterString}[vout];[1:a]aselect='{selectExpr}',asetpts=N/SR/TB[aout]");
+                        pipeStartInfo.ArgumentList.Add("-map");
+                        pipeStartInfo.ArgumentList.Add("[vout]");
+                        pipeStartInfo.ArgumentList.Add("-map");
+                        pipeStartInfo.ArgumentList.Add("[aout]");
+                        hasFilterComplex = true;
                     }
 
                     if (!hasFilterComplex)
                     {
                         pipeStartInfo.ArgumentList.Add("-vf");
-                        pipeStartInfo.ArgumentList.Add("scale=1080:1920:flags=lanczos,format=yuv420p");
+                        pipeStartInfo.ArgumentList.Add($"scale=1080:1920:flags=lanczos,format=yuv420p{assFilterString}");
                         pipeStartInfo.ArgumentList.Add("-map");
                         pipeStartInfo.ArgumentList.Add("0:v:0");
                         pipeStartInfo.ArgumentList.Add("-map");
@@ -281,6 +316,11 @@ namespace ClipStudio.Services
                 {
                     try { File.Delete(tempFullVideoPath); } catch { }
                 }
+
+                if (tempAssPath != null && File.Exists(tempAssPath))
+                {
+                    try { File.Delete(tempAssPath); } catch { }
+                }
             }
         }
 
@@ -357,7 +397,7 @@ namespace ClipStudio.Services
             blurFgTemp.CopyTo(outRoi);
         }
 
-        private string BuildSelectExpression(ClipCandidate clip, List<TranscriptionService.CutSpan> fillers)
+        private static List<(double Start, double End)> BuildKeepSpans(ClipCandidate clip, List<TranscriptionService.CutSpan> fillers)
         {
             var keepSpans = new List<(double Start, double End)>();
             double current = clip.StartTime.TotalSeconds;
@@ -376,6 +416,11 @@ namespace ClipStudio.Services
                 keepSpans.Add((current, clip.EndTime.TotalSeconds));
             }
 
+            return keepSpans;
+        }
+
+        private string BuildSelectExpression(ClipCandidate clip, List<(double Start, double End)> keepSpans)
+        {
             var terms = keepSpans.Select(s =>
             {
                 double start = s.Start - clip.StartTime.TotalSeconds;
