@@ -22,7 +22,7 @@ namespace ClipStudio.Services
             _ffprobePath = Path.Combine(AppContext.BaseDirectory, "Binaries", "ffprobe.exe");
         }
 
-        public async Task<string> ExtractAudioAsync(string videoPath, CancellationToken cancellationToken)
+        public async Task<string> ExtractAudioAsync(string videoPath, CancellationToken cancellationToken, TimeSpan? start = null, TimeSpan? end = null)
         {
             if (!File.Exists(_ffmpegPath))
                 throw new FileNotFoundException($"ffmpeg.exe not found at {_ffmpegPath}");
@@ -37,6 +37,19 @@ namespace ClipStudio.Services
                 WorkingDirectory = TempPaths.GetTempDir()
             };
             startInfo.ArgumentList.Add("-y");
+
+            if (start.HasValue)
+            {
+                startInfo.ArgumentList.Add("-ss");
+                startInfo.ArgumentList.Add(start.Value.TotalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+
+            if (end.HasValue)
+            {
+                startInfo.ArgumentList.Add("-to");
+                startInfo.ArgumentList.Add(end.Value.TotalSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            }
+
             startInfo.ArgumentList.Add("-i");
             startInfo.ArgumentList.Add(videoPath);
             startInfo.ArgumentList.Add("-vn");
