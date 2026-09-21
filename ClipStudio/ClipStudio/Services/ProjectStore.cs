@@ -14,6 +14,10 @@ namespace ClipStudio.Services
     {
         private const int SchemaVersion = 1;
 
+        private static bool SameClip(TimeSpan aStart, TimeSpan aEnd, TimeSpan bStart, TimeSpan bEnd) =>
+            Math.Abs((aStart - bStart).TotalSeconds) <= 0.05 &&
+            Math.Abs((aEnd - bEnd).TotalSeconds) <= 0.05;
+
         public static string GetProjectsRoot()
         {
             return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "ClipStudio", "projects");
@@ -214,6 +218,99 @@ namespace ClipStudio.Services
 
                 string json = JsonSerializer.Serialize(cacheFile);
                 File.WriteAllText(tmpPath, json);
+                File.Move(tmpPath, filePath, true);
+            }
+            catch
+            {
+            }
+        }
+
+        public static ClipEditsFile? TryLoadEdits(string sourceKey)
+        {
+            try
+            {
+                string dirPath = Path.Combine(GetProjectsRoot(), sourceKey);
+                string filePath = Path.Combine(dirPath, "edits.json");
+
+                if (!File.Exists(filePath))
+                {
+                    return null;
+                }
+
+                string json = File.ReadAllText(filePath);
+                var cacheFile = JsonSerializer.Deserialize<ClipEditsFile>(json);
+
+                if (cacheFile == null) return null;
+
+                if (cacheFile.SchemaVersion == SchemaVersion && cacheFile.SourceKey == sourceKey)
+                {
+                    return cacheFile;
+                }
+            }
+            catch
+            {
+            }
+
+            return null;
+        }
+
+        public static void SaveEdit(string sourceKey, ClipCandidate clip)
+        {
+            try
+            {
+                string dirPath = Path.Combine(GetProjectsRoot(), sourceKey);
+                Directory.CreateDirectory(dirPath);
+
+                string filePath = Path.Combine(dirPath, "edits.json");
+                string tmpPath = filePath + ".tmp";
+
+                ClipEditsFile cacheFile;
+                if (File.Exists(filePath))
+                {
+                    try
+                    {
+                        string json = File.ReadAllText(filePath);
+                        cacheFile = JsonSerializer.Deserialize<ClipEditsFile>(json) ?? new ClipEditsFile();
+                        if (cacheFile.SchemaVersion != SchemaVersion || cacheFile.SourceKey != sourceKey)
+                        {
+                            cacheFile = new ClipEditsFile { SchemaVersion = SchemaVersion, SourceKey = sourceKey };
+                        }
+                    }
+                    catch
+                    {
+                        cacheFile = new ClipEditsFile { SchemaVersion = SchemaVersion, SourceKey = sourceKey };
+                    }
+                }
+                else
+                {
+                    cacheFile = new ClipEditsFile { SchemaVersion = SchemaVersion, SourceKey = sourceKey };
+                }
+
+                var existingEditIndex = cacheFile.Edits.FindIndex(e => SameClip(e.OriginalStart, e.OriginalEnd, clip.OriginalStartTime, clip.OriginalEndTime));
+
+                var newEdit = new SavedClipEdit
+                {
+                    OriginalStart = clip.OriginalStartTime,
+                    OriginalEnd = clip.OriginalEndTime,
+                    Start = clip.StartTime,
+                    End = clip.EndTime,
+                    DeletedRanges = clip.DeletedRanges.ToList(),
+                    EditorWords = clip.EditorWords?.ToList(),
+                    Transcript = clip.Transcript,
+                    SavedUtc = DateTime.UtcNow
+                };
+
+                if (existingEditIndex >= 0)
+                {
+                    cacheFile.Edits[existingEditIndex] = newEdit;
+                }
+                else
+                {
+                    cacheFile.Edits.Add(newEdit);
+                }
+
+                string outJson = JsonSerializer.Serialize(cacheFile);
+                File.WriteAllText(tmpPath, outJson);
                 File.Move(tmpPath, filePath, true);
             }
             catch

@@ -7,6 +7,7 @@ using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using ClipStudio.Models;
 using ClipStudio.Services;
+using System.Linq;
 
 namespace ClipStudio.ViewModels
 {
@@ -72,6 +73,8 @@ namespace ClipStudio.ViewModels
 
         [ObservableProperty]
         private string _statusText = "Ready";
+
+        private string? _currentSourceKey;
 
         [ObservableProperty]
         private bool _isReviewing = false;
@@ -241,6 +244,8 @@ namespace ClipStudio.ViewModels
         [RelayCommand]
         private async Task StartAsync()
         {
+            _currentSourceKey = null;
+
             if (string.IsNullOrWhiteSpace(SourcePath))
             {
                 Logger.Log("Source must be specified.");
@@ -316,6 +321,7 @@ namespace ClipStudio.ViewModels
                 }
 
                 string? sourceKey = ProjectStore.GetSourceKey(videoPath, _downloadedFilePath != null);
+                _currentSourceKey = sourceKey;
 
                 ProgressValue = 0;
                 StatusText = "Extracting Audio...";
@@ -462,7 +468,48 @@ namespace ClipStudio.ViewModels
 
                 foreach (var candidate in candidates)
                 {
+                    candidate.OriginalStartTime = candidate.StartTime;
+                    candidate.OriginalEndTime = candidate.EndTime;
                     ProposedClips.Add(new ClipCandidateViewModel(candidate));
+                }
+
+                if (ReuseSavedData && _currentSourceKey != null)
+                {
+                    var savedEditsFile = ProjectStore.TryLoadEdits(_currentSourceKey);
+                    if (savedEditsFile != null)
+                    {
+                        int restoredCount = 0;
+                        foreach (var vm in ProposedClips)
+                        {
+                            var candidate = vm.GetClip();
+                            var saved = savedEditsFile.Edits.FirstOrDefault(e =>
+                                Math.Abs((e.OriginalStart - candidate.OriginalStartTime).TotalSeconds) <= 0.05 &&
+                                Math.Abs((e.OriginalEnd - candidate.OriginalEndTime).TotalSeconds) <= 0.05);
+
+                            if (saved != null)
+                            {
+                                var normalizedRanges = ClipEditMath.NormalizeRanges(saved.DeletedRanges, saved.Start, saved.End);
+                                if (ClipEditMath.TrySetTrim(candidate, saved.Start, saved.End))
+                                {
+                                    candidate.StartTime = saved.Start;
+                                    candidate.EndTime = saved.End;
+                                    candidate.DeletedRanges = normalizedRanges;
+                                    candidate.EditorWords = saved.EditorWords?.ToList();
+                                    if (!string.IsNullOrWhiteSpace(saved.Transcript))
+                                    {
+                                        candidate.Transcript = saved.Transcript;
+                                    }
+                                    vm.RefreshFromClip();
+                                    restoredCount++;
+                                }
+                            }
+                        }
+
+                        if (restoredCount > 0)
+                        {
+                            Logger.Log($"Restored saved edits for {restoredCount} clip(s)");
+                        }
+                    }
                 }
 
                 if (ReviewClipsEnabled)
@@ -538,7 +585,13 @@ namespace ClipStudio.ViewModels
 
             var editorVm = new ClipEditorViewModel(item.GetClip(), sourceVideo, UseGpuForTranscription, Logger);
             var editorWin = new ClipEditorWindow { Owner = System.Windows.Application.Current.MainWindow, DataContext = editorVm };
-            editorWin.ShowDialog();
+
+            bool? result = editorWin.ShowDialog();
+
+            if (_currentSourceKey != null && (result == true || item.GetClip().EditorWords != null))
+            {
+                ProjectStore.SaveEdit(_currentSourceKey, item.GetClip());
+            }
 
             item.RefreshFromClip();
         }
